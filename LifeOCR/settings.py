@@ -25,7 +25,8 @@ SECRET_KEY = 'django-insecure-g!i!)4jy$!jo++6k++j(=$yrwu9uyi9qb9-b9+tk^2%!iuh2wr
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+# 本番環境用に書き換え
+ALLOWED_HOSTS = ['lifeocr.fly.dev', 'localhost', '127.0.0.1', '*']
 
 
 # Application definition
