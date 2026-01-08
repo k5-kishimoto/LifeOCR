@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1
 # 1. システムライブラリのインストール
 # PaddleOCR(libgomp1, libgl1), OpenCV(libglib2.0), PDF(poppler-utils) に必要
 RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     libgomp1 \
     poppler-utils \
