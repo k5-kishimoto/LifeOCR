@@ -30,10 +30,10 @@ console_command = '/code/manage.py shell'
 
 
 [[vm]]
-  memory = '4gb'
+  memory = '1gb'
   cpu_kind = 'shared'
-  cpus = 2
-  memory_mb = 4192
+  cpus = 1
+  memory_mb = 1024
 
 [[statics]]
   guest_path = '/code/static'
