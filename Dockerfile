@@ -23,9 +23,6 @@ RUN pip install --upgrade pip && \
 
 COPY . /code
 
-# 3. ポート8080を開放
-EXPOSE 8080
-
-# 4. 起動コマンド
-# 0.0.0.0:8080 で起動するように指定します
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8080"]
+EXPOSE 8000
+# 必ず 0.0.0.0:8000 と指定します（127.0.0.1 だと繋がりません）
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
