@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AI OCR カメラ対応版</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; }
+        .result-container {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            padding: 20px;
+        }
+        .table-custom th, .table-custom td { vertical-align: top; min-width: 100px; }
+        .auto-resize {
+            resize: none; overflow: hidden; min-height: 38px;
+            border: 1px solid transparent; background-color: transparent;
+        }
+        .auto-resize:focus {
+            background-color: #fff; border-color: #86b7fe;
+            box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+        }
+        /* プレビュー画像のスタイル */
+        #preview-image {
+            max-width: 100%;
+            max-height: 300px;
+            border-radius: 8px;
+            border: 2px solid #ddd;
+            display: none; /* 最初は隠しておく */
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container py-5">
+        <h1 class="text-center mb-4 text-secondary">📸 カメラスキャン OCR</h1>
+
+        <div class="row justify-content-center mb-5">
+            <div class="col-md-8">
+                <div class="card shadow-sm">
+                    <div class="card-body text-center p-4">
+                        <form method="post" enctype="multipart/form-data">
+                            {% csrf_token %}
+                            
+                            <img id="preview-image" src="" alt="プレビュー">
+
+                            <div class="d-flex gap-2 justify-content-center align-items-center flex-wrap">
+                                <input class="form-control w-auto" type="file" name="image" 
+                                       accept="image/*,application/pdf"
+                                       id="camera-input" 
+                                       required>
+                                
+                                <button type="submit" class="btn btn-primary px-4">
+                                    読み取る
+                                </button>
+                            </div>
+                            <p class="text-muted mt-2 small">※スマホの場合、カメラが起動します</p>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        {% if results %}
+            <div class="result-container">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="text-muted mb-0">読み取り結果</h5>
+                    <button type="button" class="btn btn-success" onclick="downloadCSV()">
+                        📥 CSVダウンロード
+                    </button>
+                </div>
+                <form>
+                    <div class="table-responsive">
+                        <table id="ocr-table" class="table table-bordered table-hover align-middle">
+                            <tbody>
+                                {% for row in results %}
+                                <tr>
+                                    {% for item in row %}
+                                    <td class="p-0">
+                                        <textarea class="form-control auto-resize" rows="1" oninput="adjustHeight(this)">{{ item.text }}</textarea>
+                                    </td>
+                                    {% endfor %}
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </form>
+            </div>
+        {% endif %}
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <script>
+        // --- 1. 画像プレビュー機能（新規追加） ---
+        const cameraInput = document.getElementById('camera-input');
+        const previewImage = document.getElementById('preview-image');
+
+        cameraInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    previewImage.src = e.target.result;
+                    previewImage.style.display = 'block'; // 画像を表示
+                }
+                reader.readAsDataURL(file);
+            }
+        });
+
+        // --- 2. 高さ自動調整 ---
+        function adjustHeight(element) {
+            element.style.height = 'auto';
+            element.style.height = (element.scrollHeight) + 'px';
+        }
+        document.addEventListener("DOMContentLoaded", function() {
+            document.querySelectorAll('.auto-resize').forEach(textarea => adjustHeight(textarea));
+        });
+
+        // --- 3. CSVダウンロード ---
+        function downloadCSV() {
+            const table = document.getElementById("ocr-table");
+            const rows = table.querySelectorAll("tr");
+            let csvContent = "\uFEFF"; 
+
+            rows.forEach(row => {
+                const cols = row.querySelectorAll("textarea");
+                let rowData = [];
+                cols.forEach(col => {
+                    let text = col.value.replace(/"/g, '""'); 
+                    if (text.search(/("|,|\n)/g) >= 0) text = `"${text}"`;
+                    rowData.push(text);
+                });
+                csvContent += rowData.join(",") + "\n";
+            });
+
+            const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = "ocr_result.csv";
+            link.click();
+        }
+    </script>
+</body>
+</html>
