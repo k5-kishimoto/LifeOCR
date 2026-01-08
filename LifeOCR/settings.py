@@ -117,3 +117,11 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+
+# ★重要: Fly.ioのURLを「信頼できる送信元」として登録します
+# (https:// を忘れずにつけてください)
+CSRF_TRUSTED_ORIGINS = ['https://lifeocr.fly.dev']
+
+# ★重要: Fly.ioなどのクラウド環境でHTTPSを正しく認識させる設定
+# (これがないと、「安全な接続ではない」と誤解されてエラーが続くことがあります)
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')

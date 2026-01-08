@@ -78,7 +78,7 @@ class OcrEngine:
         rows = []
         current_row = []
         last_y = -1
-        threshold = 15
+        threshold = 60
 
         for item in raw_items:
             current_y = item['box'][0][1]
