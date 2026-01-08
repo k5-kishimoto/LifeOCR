@@ -20,14 +20,6 @@ console_command = '/code/manage.py shell'
   min_machines_running = 0
   processes = ['app']
 
-  [http_service.checks]
-    grace_period = "30s"  # ← ここを追加！（起動チェック開始まで30秒待つ）
-    interval = "15s"
-    timeout = "10s"
-    method = "get"
-    path = "/"
-    protocol = "http"
-
 
 [[vm]]
   memory = '1gb'
