@@ -102,7 +102,7 @@ class OcrEngine:
         rows = []
         current_row = []
         last_y = -1
-        threshold = 50 # リサイズした場合はこの閾値も調整が必要かも（一旦そのまま）
+        threshold = 30 # リサイズした場合はこの閾値も調整が必要かも（一旦そのまま）
 
         for item in raw_items:
             current_y = item['box'][0][1]
