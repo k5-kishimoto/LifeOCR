@@ -5,7 +5,7 @@ from pdf2image import convert_from_bytes
 
 class OcrEngine:
     def __init__(self):
-        # ★重要：起動時にはモデルを読み込まない（Noneにしておく）
+        # 起動時はモデルを読み込まない（高速化）
         self._ocr_model = None
 
     @property
@@ -15,7 +15,6 @@ class OcrEngine:
         """
         if self._ocr_model is None:
             print("⏳ Loading PaddleOCR model for the first time...")
-            # ここで初めて重い処理が走る
             self._ocr_model = PaddleOCR(use_angle_cls=True, lang='japan')
             print("✅ Model loaded!")
         return self._ocr_model
@@ -23,7 +22,13 @@ class OcrEngine:
     def extract_text(self, uploaded_file):
         # ファイル読み込み処理
         file_bytes = uploaded_file.read()
-        filename = uploaded_file.name.lower()
+        
+        # ファイル名が取得できない場合の対策
+        try:
+            filename = uploaded_file.name.lower()
+        except AttributeError:
+            filename = "unknown.jpg"
+            
         all_rows = []
 
         # --- A. PDFの場合 ---
@@ -54,40 +59,51 @@ class OcrEngine:
         return all_rows
 
     def _process_one_image(self, img):
-        # ★ここで self.ocr を呼ぶと、自動的にロード処理が走ります
+        # ここで self.ocr を呼ぶとロードが走る
         result = self.ocr.ocr(img)
 
         raw_items = []
+        # PaddleOCRのバージョン違いによるレスポンス形式の吸収
         if isinstance(result, list) and len(result) > 0:
+            if result[0] is None: # 読み取り結果なし
+                return []
+                
             if isinstance(result[0], dict):
+                # v2.7以降の辞書形式
                 data = result[0]
                 dt_boxes = data.get('dt_polys', [])
                 rec_texts = data.get('rec_texts', [])
                 rec_scores = data.get('rec_scores', [])
                 for box, text, score in zip(dt_boxes, rec_texts, rec_scores):
                     raw_items.append({'box': box, 'text': text, 'score': score})
+            
             elif isinstance(result[0], list):
+                # 古いリスト形式
                 for line in result[0]:
-                    raw_items.append({'box': line[0], 'text': line[1][0], 'score': line[1][1]})
+                    if line is not None:
+                        raw_items.append({'box': line[0], 'text': line[1][0], 'score': line[1][1]})
 
         if not raw_items:
             return []
 
+        # Y座標でソート
         raw_items.sort(key=lambda x: x['box'][0][1])
 
         rows = []
         current_row = []
         last_y = -1
-        threshold = 60
+        threshold = 15
 
         for item in raw_items:
             current_y = item['box'][0][1]
+            
             if last_y == -1:
                 current_row.append(item)
                 last_y = current_y
             elif abs(current_y - last_y) < threshold:
                 current_row.append(item)
             else:
+                # 行が変わる
                 current_row.sort(key=lambda x: x['box'][0][0])
                 rows.append(current_row)
                 current_row = [item]
