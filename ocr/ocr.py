@@ -1,11 +1,10 @@
-from paddleocr import PaddleOCR
+# ★重要：ここでは PaddleOCR をインポートしません（起動が速くなります）
 import numpy as np
 import cv2
 from pdf2image import convert_from_bytes
 
 class OcrEngine:
     def __init__(self):
-        # 起動時はモデルを読み込まない（高速化）
         self._ocr_model = None
 
     @property
@@ -15,6 +14,11 @@ class OcrEngine:
         """
         if self._ocr_model is None:
             print("⏳ Loading PaddleOCR model for the first time...")
+            
+            # ★重要：ここで初めてインポートします！
+            # これにより、アプリ起動時には重い処理が一切走りません
+            from paddleocr import PaddleOCR
+            
             self._ocr_model = PaddleOCR(use_angle_cls=True, lang='japan')
             print("✅ Model loaded!")
         return self._ocr_model
@@ -23,7 +27,6 @@ class OcrEngine:
         # ファイル読み込み処理
         file_bytes = uploaded_file.read()
         
-        # ファイル名が取得できない場合の対策
         try:
             filename = uploaded_file.name.lower()
         except AttributeError:
@@ -63,13 +66,11 @@ class OcrEngine:
         result = self.ocr.ocr(img)
 
         raw_items = []
-        # PaddleOCRのバージョン違いによるレスポンス形式の吸収
         if isinstance(result, list) and len(result) > 0:
-            if result[0] is None: # 読み取り結果なし
+            if result[0] is None:
                 return []
                 
             if isinstance(result[0], dict):
-                # v2.7以降の辞書形式
                 data = result[0]
                 dt_boxes = data.get('dt_polys', [])
                 rec_texts = data.get('rec_texts', [])
@@ -78,7 +79,6 @@ class OcrEngine:
                     raw_items.append({'box': box, 'text': text, 'score': score})
             
             elif isinstance(result[0], list):
-                # 古いリスト形式
                 for line in result[0]:
                     if line is not None:
                         raw_items.append({'box': line[0], 'text': line[1][0], 'score': line[1][1]})
@@ -86,24 +86,21 @@ class OcrEngine:
         if not raw_items:
             return []
 
-        # Y座標でソート
         raw_items.sort(key=lambda x: x['box'][0][1])
 
         rows = []
         current_row = []
         last_y = -1
-        threshold = 50
+        threshold = 50  # 行を分けるためのY座標の閾値
 
         for item in raw_items:
             current_y = item['box'][0][1]
-            
             if last_y == -1:
                 current_row.append(item)
                 last_y = current_y
             elif abs(current_y - last_y) < threshold:
                 current_row.append(item)
             else:
-                # 行が変わる
                 current_row.sort(key=lambda x: x['box'][0][0])
                 rows.append(current_row)
                 current_row = [item]
