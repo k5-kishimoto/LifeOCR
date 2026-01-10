@@ -21,12 +21,6 @@ console_command = '/code/manage.py shell'
   processes = ['app']
 
 
-[[vm]]
-  memory = '8gb'
-  cpu_kind = 'performance-2x'
-  cpus = 2
-  memory_mb = 8192
-
 [[statics]]
   guest_path = '/code/static'
   url_prefix = '/static/'
