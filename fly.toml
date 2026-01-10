@@ -22,10 +22,10 @@ console_command = '/code/manage.py shell'
 
 
 [[vm]]
-  memory = '1gb'
-  cpu_kind = 'shared'
-  cpus = 1
-  memory_mb = 1024
+  memory = '8gb'
+  cpu_kind = 'performance-2x'
+  cpus = 2
+  memory_mb = 8192
 
 [[statics]]
   guest_path = '/code/static'
