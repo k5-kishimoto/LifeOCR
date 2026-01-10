@@ -12,15 +12,14 @@ class OcrEngine:
         必要な時に初めてモデルを読み込む
         """
         if self._ocr_model is None:
-            print("⏳ Loading PaddleOCR model with acceleration...")
+            print("⏳ Loading PaddleOCR model (Speed & Memory Optimized)...")
             from paddleocr import PaddleOCR
             
-            # ★高速化のポイント1：MKLDNNを有効にする
-            # これだけでCPUでの推論速度が数倍になることがあります
             self._ocr_model = PaddleOCR(
-                use_angle_cls=True,  # 画像の向き補正（不要ならFalseにするとさらに速い）
+                # 高速化のため向き補正OFF（必要ならTrueに戻してください）
+                use_angle_cls=True,
                 lang='japan', 
-                enable_mkldnn=False,  # ★CPU高速化ON
+                enable_mkldnn=False, 
             )
             print("✅ Model loaded!")
         return self._ocr_model
@@ -38,19 +37,23 @@ class OcrEngine:
         # --- A. PDFの場合 ---
         if filename.endswith('.pdf'):
             try:
-                # dpiをさらに下げてメモリ節約（150 -> 100）
-                # 通常の文書なら100dpiでも十分認識します
-                pil_images = convert_from_bytes(file_bytes, dpi=180)
+                # 【高速化・メモリ節約】
+                # grayscale=True で最初から白黒で読み込む
+                # dpi=180 で解像度を抑える
+                pil_images = convert_from_bytes(file_bytes, dpi=180, grayscale=True)
                 
                 for i, pil_img in enumerate(pil_images):
-                    open_cv_image = np.array(pil_img)
-                    open_cv_image = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
+                    # PIL(Gray) -> NumPy(Gray 1ch)
+                    gray_image = np.array(pil_img)
                     
-                    # ★【重要】ここにもリサイズ処理を追加！
-                    # これがないと、大きなPDFページでメモリが10GB以上必要になり落ちます
-                    open_cv_image = self._resize_image_if_too_large(open_cv_image)
+                    # リサイズ（白黒のまま行うので計算量が1/3で済みます）
+                    gray_image = self._resize_image_if_too_large(gray_image)
                     
-                    page_rows = self._process_one_image(open_cv_image)
+                    # PaddleOCRは3チャンネル入力を好むため、最後にBGR形式に変換
+                    # （見た目は白黒のままですが、データ形式だけ合わせます）
+                    bgr_image = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2BGR)
+                    
+                    page_rows = self._process_one_image(bgr_image)
                     
                     if page_rows:
                         if i > 0:
@@ -58,33 +61,43 @@ class OcrEngine:
                         all_rows.extend(page_rows)
             except Exception as e:
                 print(f"PDF Error: {e}")
-                # エラーが起きても、空リストではなく「エラー」と分かるように返すと親切かも
                 return []
 
         # --- B. 画像の場合 ---
         else:
             img_np = np.frombuffer(file_bytes, np.uint8)
-            img = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
-            if img is not None:
-                # こちらは既にリサイズ処理が入っているのでOK
-                img = self._resize_image_if_too_large(img)
-                all_rows = self._process_one_image(img)
+            
+            # 【高速化】cv2.IMREAD_GRAYSCALE で白黒として読み込む
+            gray_image = cv2.imdecode(img_np, cv2.IMREAD_GRAYSCALE)
+            
+            if gray_image is not None:
+                # リサイズ（白黒のまま行うので高速）
+                gray_image = self._resize_image_if_too_large(gray_image)
+                
+                # PaddleOCR用に3チャンネル形式へ変換
+                bgr_image = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2BGR)
+                
+                all_rows = self._process_one_image(bgr_image)
 
         return all_rows
 
-    def _resize_image_if_too_large(self, img, max_width=1280):
+    def _resize_image_if_too_large(self, img, max_width=1024):
         """
         画像が大きすぎる場合にリサイズする関数
+        白黒画像のまま処理するため非常に高速です
         """
-        height, width = img.shape[:2]
-        if width > max_width:
-            # アスペクト比を維持して縮小
-            scale = max_width / width
-            new_height = int(height * scale)
+        # img.shape は (高さ, 幅) または (高さ, 幅, チャンネル)
+        h, w = img.shape[:2]
+        
+        if w > max_width:
+            scale = max_width / w
+            new_height = int(h * scale)
+            # 縮小処理
             img = cv2.resize(img, (max_width, new_height), interpolation=cv2.INTER_AREA)
         return img
 
     def _process_one_image(self, img):
+        # OCR実行
         result = self.ocr.ocr(img)
 
         raw_items = []
@@ -111,7 +124,8 @@ class OcrEngine:
         rows = []
         current_row = []
         last_y = -1
-        threshold = 25 # リサイズした場合はこの閾値も調整が必要かも（一旦そのまま）
+        # 画像サイズ縮小済のため、閾値は小さめに設定
+        threshold = 20 
 
         for item in raw_items:
             current_y = item['box'][0][1]
