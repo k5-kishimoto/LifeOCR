@@ -40,7 +40,7 @@ class OcrEngine:
             try:
                 # dpiをさらに下げてメモリ節約（150 -> 100）
                 # 通常の文書なら100dpiでも十分認識します
-                pil_images = convert_from_bytes(file_bytes, dpi=100)
+                pil_images = convert_from_bytes(file_bytes, dpi=150)
                 
                 for i, pil_img in enumerate(pil_images):
                     open_cv_image = np.array(pil_img)
