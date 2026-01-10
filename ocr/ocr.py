@@ -39,8 +39,8 @@ class OcrEngine:
             try:
                 # 【高速化・メモリ節約】
                 # grayscale=True で最初から白黒で読み込む
-                # dpi=180 で解像度を抑える
-                pil_images = convert_from_bytes(file_bytes, dpi=180, grayscale=True)
+                # dpi=200 で解像度を抑える
+                pil_images = convert_from_bytes(file_bytes, dpi=200, grayscale=True)
                 
                 for i, pil_img in enumerate(pil_images):
                     # PIL(Gray) -> NumPy(Gray 1ch)
@@ -81,7 +81,7 @@ class OcrEngine:
 
         return all_rows
 
-    def _resize_image_if_too_large(self, img, max_width=1024):
+    def _resize_image_if_too_large(self, img, max_width=1440):
         """
         画像が大きすぎる場合にリサイズする関数
         白黒画像のまま処理するため非常に高速です
@@ -125,7 +125,7 @@ class OcrEngine:
         current_row = []
         last_y = -1
         # 画像サイズ縮小済のため、閾値は小さめに設定
-        threshold = 20 
+        threshold = 15 
 
         for item in raw_items:
             current_y = item['box'][0][1]
