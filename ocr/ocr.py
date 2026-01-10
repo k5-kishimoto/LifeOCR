@@ -20,6 +20,15 @@ class OcrEngine:
                 use_angle_cls=True,
                 lang='japan', 
                 enable_mkldnn=False, 
+                # ★【高速化の秘策】
+                # 「文字を探す（Detection）」時の画像サイズを小さく制限します。
+                # デフォルトは960ですが、これを736などに下げると検索が爆速になります。
+                # ※「文字を読む（Recognition）」時は元の高画質画像を使うので、
+                #   読み取り精度はほとんど落ちません！
+                det_limit_side_len=736,
+                # ★【高速化2】認識バッチサイズを増やす (デフォルト6 -> 20)
+                # 小さい文字領域をまとめて一気に処理させることで速度を稼ぎます
+                rec_batch_num=20,
             )
             print("✅ Model loaded!")
         return self._ocr_model
