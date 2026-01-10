@@ -21,7 +21,6 @@ class OcrEngine:
                 use_angle_cls=True,  # 画像の向き補正（不要ならFalseにするとさらに速い）
                 lang='japan', 
                 enable_mkldnn=True,  # ★CPU高速化ON
-                use_gpu=False        # GPUは使わない
             )
             print("✅ Model loaded!")
         return self._ocr_model
