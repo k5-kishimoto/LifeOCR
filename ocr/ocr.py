@@ -20,7 +20,7 @@ class OcrEngine:
             self._ocr_model = PaddleOCR(
                 use_angle_cls=True,  # 画像の向き補正（不要ならFalseにするとさらに速い）
                 lang='japan', 
-                enable_mkldnn=True,  # ★CPU高速化ON
+                enable_mkldnn=False,  # ★CPU高速化ON
             )
             print("✅ Model loaded!")
         return self._ocr_model
@@ -102,7 +102,7 @@ class OcrEngine:
         rows = []
         current_row = []
         last_y = -1
-        threshold = 30 # リサイズした場合はこの閾値も調整が必要かも（一旦そのまま）
+        threshold = 25 # リサイズした場合はこの閾値も調整が必要かも（一旦そのまま）
 
         for item in raw_items:
             current_y = item['box'][0][1]
