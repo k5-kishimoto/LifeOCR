@@ -35,29 +35,38 @@ class OcrEngine:
             
         all_rows = []
 
+        # --- A. PDFの場合 ---
         if filename.endswith('.pdf'):
             try:
-                # ★高速化のポイント2：PDF変換時の解像度を下げる (200 -> 150)
-                # 150dpiでもレシートの文字なら十分読めます
-                pil_images = convert_from_bytes(file_bytes, dpi=150)
+                # dpiをさらに下げてメモリ節約（150 -> 100）
+                # 通常の文書なら100dpiでも十分認識します
+                pil_images = convert_from_bytes(file_bytes, dpi=100)
+                
                 for i, pil_img in enumerate(pil_images):
                     open_cv_image = np.array(pil_img)
                     open_cv_image = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
+                    
+                    # ★【重要】ここにもリサイズ処理を追加！
+                    # これがないと、大きなPDFページでメモリが10GB以上必要になり落ちます
+                    open_cv_image = self._resize_image_if_too_large(open_cv_image)
+                    
                     page_rows = self._process_one_image(open_cv_image)
+                    
                     if page_rows:
                         if i > 0:
                             all_rows.append([{'text': f'--- {i+1}ページ目 ---', 'score': ''}])
                         all_rows.extend(page_rows)
             except Exception as e:
                 print(f"PDF Error: {e}")
+                # エラーが起きても、空リストではなく「エラー」と分かるように返すと親切かも
                 return []
 
+        # --- B. 画像の場合 ---
         else:
             img_np = np.frombuffer(file_bytes, np.uint8)
             img = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
             if img is not None:
-                # ★高速化のポイント3：巨大な画像をリサイズする
-                # スマホ写真は4000pxとかあるので、幅1280px程度に縮小すると爆速になります
+                # こちらは既にリサイズ処理が入っているのでOK
                 img = self._resize_image_if_too_large(img)
                 all_rows = self._process_one_image(img)
 
