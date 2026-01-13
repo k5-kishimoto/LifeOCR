@@ -29,12 +29,12 @@ console_command = '/code/manage.py shell'
   processes = ['app']
 
   # ★ここを追加・変更
-#  [http_service.concurrency]
-#    type = "requests"
-#    # 同時に処理できる人数を「1」に制限する
-#    # 2人目が来たら、1人目が終わるまでFly.io側で待機させます（サーバーには負荷がかかりません）
-#    hard_limit = 1
-#    soft_limit = 1
+  [http_service.concurrency]
+    type = "requests"
+    # 同時に処理できる人数を「1」に制限する
+    # 2人目が来たら、1人目が終わるまでFly.io側で待機させます（サーバーには負荷がかかりません）
+    hard_limit = 1
+    soft_limit = 1
 
 [[statics]]
   guest_path = '/code/static'
