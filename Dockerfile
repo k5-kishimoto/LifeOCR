@@ -30,4 +30,4 @@ EXPOSE 8000
 # ⭕ 変更後: 本番用サーバー Gunicorn を使用
 # --timeout 120 : OCRが120秒かかっても切断されないようにする
 # --workers 1   : メモリ節約のため1プロセスに制限
-CMD ["gunicorn", "LifeOCR.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "1", "--timeout", "300", "--preload"]
+CMD ["gunicorn", "LifeOCR.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "300", "--preload"]
