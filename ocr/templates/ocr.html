@@ -14,14 +14,35 @@
             padding: 20px;
         }
         .table-custom th, .table-custom td { vertical-align: top; min-width: 100px; }
+        
+        /* テキストエリアのスタイル調整 */
         .auto-resize {
             resize: none; overflow: hidden; min-height: 38px;
             border: 1px solid transparent; background-color: transparent;
+            width: 100%; /* 横幅いっぱいに */
         }
         .auto-resize:focus {
             background-color: #fff; border-color: #86b7fe;
             box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+            outline: none;
         }
+
+        /* コピーボタンのスタイル */
+        .copy-btn {
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            font-size: 1.2rem;
+            padding: 5px 10px;
+            color: #6c757d;
+            transition: all 0.2s;
+            border-radius: 5px;
+        }
+        .copy-btn:hover {
+            background-color: #e9ecef;
+            color: #0d6efd;
+        }
+
         /* プレビュー画像のスタイル */
         #preview-image {
             max-width: 100%;
@@ -80,7 +101,18 @@
                                 <tr>
                                     {% for item in row %}
                                     <td class="p-0">
-                                        <textarea class="form-control auto-resize" rows="1" oninput="adjustHeight(this)">{{ item.text }}</textarea>
+                                        <div class="d-flex align-items-start">
+                                            <textarea class="form-control auto-resize flex-grow-1 border-0" 
+                                                      rows="1" 
+                                                      oninput="adjustHeight(this)">{{ item.text }}</textarea>
+                                            
+                                            <button type="button" 
+                                                    class="copy-btn" 
+                                                    onclick="copyToClipboard(this)" 
+                                                    title="クリップボードにコピー">
+                                                📋
+                                            </button>
+                                        </div>
                                     </td>
                                     {% endfor %}
                                 </tr>
@@ -96,21 +128,23 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 
     <script>
-        // --- 1. 画像プレビュー機能（新規追加） ---
+        // --- 1. 画像プレビュー機能 ---
         const cameraInput = document.getElementById('camera-input');
         const previewImage = document.getElementById('preview-image');
 
-        cameraInput.addEventListener('change', function(e) {
-            const file = e.target.files[0];
-            if (file) {
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                    previewImage.src = e.target.result;
-                    previewImage.style.display = 'block'; // 画像を表示
+        if (cameraInput) {
+            cameraInput.addEventListener('change', function(e) {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = function(e) {
+                        previewImage.src = e.target.result;
+                        previewImage.style.display = 'block';
+                    }
+                    reader.readAsDataURL(file);
                 }
-                reader.readAsDataURL(file);
-            }
-        });
+            });
+        }
 
         // --- 2. 高さ自動調整 ---
         function adjustHeight(element) {
@@ -143,6 +177,38 @@
             link.href = URL.createObjectURL(blob);
             link.download = "ocr_result.csv";
             link.click();
+        }
+
+        // --- 4. クリップボードコピー機能 (新規追加) ---
+        function copyToClipboard(btnElement) {
+            // ボタンの隣にあるテキストエリアを探す
+            // parentElement (div.d-flex) -> querySelector (textarea)
+            const container = btnElement.parentElement;
+            const textarea = container.querySelector('textarea');
+            
+            if (!textarea) return;
+
+            // テキストエリアの値をコピー
+            const textToCopy = textarea.value;
+
+            navigator.clipboard.writeText(textToCopy).then(() => {
+                // 成功時の演出
+                const originalContent = btnElement.innerHTML;
+                
+                // アイコンをチェックマークに変更
+                btnElement.innerHTML = "✅";
+                btnElement.style.color = "#198754"; // 緑色
+                
+                // 2秒後に元に戻す
+                setTimeout(() => {
+                    btnElement.innerHTML = originalContent;
+                    btnElement.style.color = ""; // 色をリセット
+                }, 2000);
+
+            }).catch(err => {
+                console.error('コピー失敗:', err);
+                alert('コピーに失敗しました');
+            });
         }
     </script>
 </body>
