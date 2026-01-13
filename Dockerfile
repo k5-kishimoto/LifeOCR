@@ -24,5 +24,10 @@ RUN pip install --upgrade pip && \
 COPY . /code
 
 EXPOSE 8000
-# 必ず 0.0.0.0:8000 と指定します（127.0.0.1 だと繋がりません）
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+# ❌ 変更前: 開発用サーバー（不安定なのでNG）
+# CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+
+# ⭕ 変更後: 本番用サーバー Gunicorn を使用
+# --timeout 120 : OCRが120秒かかっても切断されないようにする
+# --workers 1   : メモリ節約のため1プロセスに制限
+CMD ["gunicorn", "lifeocr.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "1", "--timeout", "120"]
