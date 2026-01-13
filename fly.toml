@@ -16,7 +16,7 @@ console_command = '/code/manage.py shell'
   # 安全のため「1」推奨（OCRはメモリを食うため）
   WEB_CONCURRENCY = "1"
   # PaddleOCRの設定
-  OMP_NUM_THREADS = "1"
+  OMP_NUM_THREADS = "6"
   # ログを即時出力させる（エラーが見やすくなります）
   PYTHONUNBUFFERED = "1"
 
