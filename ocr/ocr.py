@@ -57,8 +57,8 @@ class OcrEngine:
             self._ocr_model = PaddleOCR(
                 use_angle_cls=True,
                 lang='japan', 
-                enable_mkldnn=True, 
-                det_limit_side_len=640,
+                enable_mkldnn=False,
+                det_limit_side_len=320,
                 rec_batch_num=100,
             )
             print("✅ Model loaded!")
