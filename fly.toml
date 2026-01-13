@@ -14,9 +14,9 @@ console_command = '/code/manage.py shell'
   # 1つのマシンの中でいくつのプロセスを動かすか
   # メモリ2GBのマシンなら「1」か「2」が限界です。
   # 安全のため「1」推奨（OCRはメモリを食うため）
-  WEB_CONCURRENCY = "2"
+  WEB_CONCURRENCY = "1"
   # PaddleOCRの設定
-  OMP_NUM_THREADS = "4"
+  OMP_NUM_THREADS = "1"
   # ログを即時出力させる（エラーが見やすくなります）
   PYTHONUNBUFFERED = "1"
   # 共有メモリのバグ回避
