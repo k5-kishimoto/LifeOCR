@@ -1,126 +1,275 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="ja" data-bs-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>AI OCR カメラ対応版</title>
+    <title>AI OCR Pro | PDF Preview</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    
     <style>
-        body { background-color: #f8f9fa; }
-        .result-container {
-            background: white;
-            border-radius: 10px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-            padding: 20px;
+        :root {
+            --bg-color: #0f172a;       
+            --card-bg: #1e293b;        
+            --accent-color: #3b82f6;   
+            --accent-glow: rgba(59, 130, 246, 0.5);
+            --text-main: #f1f5f9;
+            --text-sub: #94a3b8;
         }
-        .table-custom th, .table-custom td { vertical-align: top; min-width: 100px; }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: 'Inter', sans-serif;
+            background-image: radial-gradient(circle at 10% 20%, rgba(59, 130, 246, 0.1) 0%, transparent 40%);
+            min-height: 100vh;
+        }
+
+        .glass-card {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+            padding: 0.8rem;
+            transition: transform 0.2s;
+        }
+
+        .upload-area {
+            border: 2px dashed #475569;
+            border-radius: 12px;
+            padding: 2rem;
+            text-align: center;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            background: rgba(15, 23, 42, 0.5);
+        }
+        .upload-area:hover {
+            border-color: var(--accent-color);
+            background: rgba(59, 130, 246, 0.1);
+            box-shadow: 0 0 15px var(--accent-glow);
+        }
+
+        .btn-gradient {
+            background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+            border: none;
+            color: white;
+            font-weight: 600;
+            padding: 0.75rem 2rem;
+            border-radius: 50px;
+            box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4);
+            transition: all 0.3s ease;
+        }
+        .btn-gradient:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(139, 92, 246, 0.4);
+            color: white;
+        }
+
+        .table-responsive {
+            width: 100%;
+            overflow-x: auto; 
+        }
+
+        .ocr-textarea {
+            background-color: #0f172a;
+            border: 1px solid #334155;
+            color: #e2e8f0;
+            border-radius: 4px;
+            resize: none;
+            overflow: hidden;
+            min-height: 34px;
+            line-height: 1.4;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+            min-width: 280px; 
+            width: 100%;
+        }
         
-        /* テキストエリアのスタイル調整 */
-        .auto-resize {
-            resize: none; overflow: hidden; min-height: 38px;
-            border: 1px solid transparent; background-color: transparent;
-            width: 100%; /* 横幅いっぱいに */
-        }
-        .auto-resize:focus {
-            background-color: #fff; border-color: #86b7fe;
-            box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+        .ocr-textarea:focus {
+            background-color: #1e293b;
+            border-color: var(--accent-color);
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
             outline: none;
         }
 
-        /* コピーボタンのスタイル */
-        .copy-btn {
-            background: transparent;
+        .action-icon-btn {
+            background: rgba(255, 255, 255, 0.05);
             border: none;
-            cursor: pointer;
-            font-size: 1.2rem;
-            padding: 5px 10px;
-            color: #6c757d;
+            color: #94a3b8;
+            width: 12px; 
+            height: 12px;
+            font-size: 10px;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             transition: all 0.2s;
-            border-radius: 5px;
+            flex-shrink: 0;
+            padding: 0;
+            line-height: 1;
         }
-        .copy-btn:hover {
-            background-color: #e9ecef;
-            color: #0d6efd;
+        .action-icon-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            transform: scale(1.1);
+        }
+        .btn-copy:hover { color: #4ade80; background: rgba(74, 222, 128, 0.1); }
+        .btn-delete:hover { color: #f87171; background: rgba(248, 113, 113, 0.1); }
+
+        /* --- 修正箇所：プレビューエリア --- */
+        .preview-container {
+            display: none; /* 初期状態は非表示 */
+            margin: 0 auto 1.5rem auto;
+            max-width: 100%;
+            text-align: center;
         }
 
-        /* プレビュー画像のスタイル */
+        /* 画像用プレビュー */
         #preview-image {
             max-width: 100%;
-            max-height: 300px;
-            border-radius: 8px;
-            border: 2px solid #ddd;
-            display: none; /* 最初は隠しておく */
-            margin-bottom: 15px;
+            max-height: 250px;
+            border-radius: 12px;
+            border: 2px solid #334155;
+            object-fit: contain;
+        }
+
+        /* PDF用プレビュー */
+        #preview-pdf {
+            width: 100%;
+            height: 400px; /* PDFは見やすいように高さを確保 */
+            border-radius: 12px;
+            border: 2px solid #334155;
+        }
+
+        #loading-overlay {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(15, 23, 42, 0.95);
+            z-index: 9999;
+            display: none;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+        }
+        .loading-text {
+            margin-top: 1rem;
+            font-weight: 600;
+            background: linear-gradient(to right, #4ade80, #3b82f6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
+
+        .brand-title {
+            font-weight: 800;
+            letter-spacing: -1px;
+            background: linear-gradient(to right, #fff, #94a3b8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
         }
     </style>
 </head>
 <body>
 
-    <div class="container py-5">
-        <h1 class="text-center mb-4 text-secondary">📸 カメラスキャン OCR</h1>
+    <div id="loading-overlay">
+        <div class="spinner-border text-primary" role="status"></div>
+        <div class="loading-text">PROCESSING...</div>
+    </div>
 
-        <div class="row justify-content-center mb-5">
-            <div class="col-md-8">
-                <div class="card shadow-sm">
-                    <div class="card-body text-center p-4">
-                        <form method="post" enctype="multipart/form-data">
-                            {% csrf_token %}
+    <div class="container-fluid py-3 px-1">
+        
+        <div class="text-center mb-4">
+            <h1 class="brand-title h4 mb-0">AI OCR PRO</h1>
+        </div>
+
+        <div class="row justify-content-center mb-3">
+            <div class="col-12 col-md-10 col-lg-8">
+                <div class="glass-card">
+                    <form method="post" enctype="multipart/form-data" onsubmit="showLoading()">
+                        {% csrf_token %}
+                        
+                        <div id="preview-box" class="preview-container">
+                            <img id="preview-image" src="" alt="Image Preview" style="display: none;">
+                            <embed id="preview-pdf" type="application/pdf" src="" style="display: none;">
+                        </div>
+
+                        <div class="upload-area mb-3 position-relative p-3">
+                            <input class="form-control position-absolute top-0 start-0 w-100 h-100 opacity-0" 
+                                   type="file" name="image" 
+                                   accept="image/*,application/pdf"
+                                   id="camera-input" 
+                                   style="cursor: pointer;"
+                                   required>
                             
-                            <img id="preview-image" src="" alt="プレビュー">
-
-                            <div class="d-flex gap-2 justify-content-center align-items-center flex-wrap">
-                                <input class="form-control w-auto" type="file" name="image" 
-                                       accept="image/*,application/pdf"
-                                       id="camera-input" 
-                                       required>
-                                
-                                <button type="submit" class="btn btn-primary px-4">
-                                    読み取る
-                                </button>
+                            <div class="text-center pointer-events-none">
+                                <div class="fs-3 mb-1">📸</div>
+                                <div class="text-white small">Tap to Scan (Img/PDF)</div>
                             </div>
-                            <p class="text-muted mt-2 small">※スマホの場合、カメラが起動します</p>
-                        </form>
-                    </div>
+                        </div>
+
+                        <div class="text-center">
+                            <button type="submit" class="btn btn-gradient w-100 py-2 btn-sm">
+                                Start Scan 🚀
+                            </button>
+                        </div>
+                    </form>
                 </div>
             </div>
         </div>
 
         {% if results %}
-            <div class="result-container">
-                <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h5 class="text-muted mb-0">読み取り結果</h5>
-                    <button type="button" class="btn btn-success" onclick="downloadCSV()">
-                        📥 CSVダウンロード
-                    </button>
-                </div>
-                <form>
-                    <div class="table-responsive">
-                        <table id="ocr-table" class="table table-bordered table-hover align-middle">
-                            <tbody>
-                                {% for row in results %}
-                                <tr>
-                                    {% for item in row %}
-                                    <td class="p-0">
-                                        <div class="d-flex align-items-start">
-                                            <textarea class="form-control auto-resize flex-grow-1 border-0" 
-                                                      rows="1" 
-                                                      oninput="adjustHeight(this)">{{ item.text }}</textarea>
-                                            
-                                            <button type="button" 
-                                                    class="copy-btn" 
-                                                    onclick="copyToClipboard(this)" 
-                                                    title="クリップボードにコピー">
-                                                📋
-                                            </button>
-                                        </div>
-                                    </td>
+            <div class="row justify-content-center">
+                <div class="col-12">
+                    <div class="glass-card px-1 pt-2 pb-2">
+                        
+                        <div class="d-flex justify-content-between align-items-center mb-2 border-bottom border-secondary pb-1 px-1">
+                            <span class="text-white small fw-bold">Results</span>
+                            <div class="d-flex gap-1">
+                                <button type="button" class="btn btn-outline-light btn-sm py-0 px-2" style="font-size: 0.7rem;" onclick="copyAllText()">
+                                    📋 All
+                                </button>
+                                <button type="button" class="btn btn-outline-success btn-sm py-0 px-2" style="font-size: 0.7rem;" onclick="downloadCSV()">
+                                    📥 CSV
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="table-responsive">
+                            <table id="ocr-table" class="table table-borderless align-middle mb-0">
+                                <tbody>
+                                    {% for row in results %}
+                                    <tr>
+                                        {% for item in row %}
+                                        <td class="p-0 pb-1">
+                                            <div class="d-flex align-items-start gap-1 p-1 rounded" style="background: rgba(0,0,0,0.15);">
+                                                
+                                                <textarea class="form-control ocr-textarea flex-grow-1" 
+                                                          rows="1" 
+                                                          oninput="adjustHeight(this)">{{ item.text }}</textarea>
+                                                
+                                                <div class="d-flex flex-column gap-1 pt-1">
+                                                    <button type="button" class="action-icon-btn btn-copy" onclick="copyToClipboard(this)" title="Copy">
+                                                        📋
+                                                    </button>
+                                                    <button type="button" class="action-icon-btn btn-delete" onclick="deleteRow(this)" title="Delete">
+                                                        🗑️
+                                                    </button>
+                                                </div>
+
+                                            </div>
+                                        </td>
+                                        {% endfor %}
+                                    </tr>
                                     {% endfor %}
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
+                                </tbody>
+                            </table>
+                        </div>
+
                     </div>
-                </form>
+                </div>
             </div>
         {% endif %}
     </div>
@@ -128,37 +277,52 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 
     <script>
-        // --- 1. 画像プレビュー機能 ---
-        const cameraInput = document.getElementById('camera-input');
-        const previewImage = document.getElementById('preview-image');
-
-        if (cameraInput) {
-            cameraInput.addEventListener('change', function(e) {
-                const file = e.target.files[0];
-                if (file) {
-                    const reader = new FileReader();
-                    reader.onload = function(e) {
-                        previewImage.src = e.target.result;
-                        previewImage.style.display = 'block';
-                    }
-                    reader.readAsDataURL(file);
-                }
-            });
+        function showLoading() {
+            document.getElementById('loading-overlay').style.display = 'flex';
         }
 
-        // --- 2. 高さ自動調整 ---
+        // --- プレビュー機能（PDF対応版） ---
+        const cameraInput = document.getElementById('camera-input');
+        const previewBox = document.getElementById('preview-box');
+        const previewImage = document.getElementById('preview-image');
+        const previewPdf = document.getElementById('preview-pdf');
+        
+        cameraInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            // コンテナを表示
+            previewBox.style.display = 'block';
+
+            if (file.type === 'application/pdf') {
+                // PDFの場合
+                const fileURL = URL.createObjectURL(file);
+                previewPdf.src = fileURL;
+                previewPdf.style.display = 'block';
+                previewImage.style.display = 'none';
+            } else {
+                // 画像の場合
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    previewImage.src = e.target.result;
+                    previewImage.style.display = 'block';
+                    previewPdf.style.display = 'none';
+                }
+                reader.readAsDataURL(file);
+            }
+        });
+
         function adjustHeight(element) {
             element.style.height = 'auto';
             element.style.height = (element.scrollHeight) + 'px';
         }
         document.addEventListener("DOMContentLoaded", function() {
-            document.querySelectorAll('.auto-resize').forEach(textarea => adjustHeight(textarea));
+            document.querySelectorAll('.ocr-textarea').forEach(textarea => adjustHeight(textarea));
         });
 
-        // --- 3. CSVダウンロード ---
         function downloadCSV() {
             const table = document.getElementById("ocr-table");
-            const rows = table.querySelectorAll("tr");
+            const rows = table.querySelectorAll("tbody tr");
             let csvContent = "\uFEFF"; 
 
             rows.forEach(row => {
@@ -169,7 +333,7 @@
                     if (text.search(/("|,|\n)/g) >= 0) text = `"${text}"`;
                     rowData.push(text);
                 });
-                csvContent += rowData.join(",") + "\n";
+                if (rowData.length > 0) csvContent += rowData.join(",") + "\n";
             });
 
             const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
@@ -179,35 +343,46 @@
             link.click();
         }
 
-        // --- 4. クリップボードコピー機能 (新規追加) ---
         function copyToClipboard(btnElement) {
-            // ボタンの隣にあるテキストエリアを探す
-            // parentElement (div.d-flex) -> querySelector (textarea)
-            const container = btnElement.parentElement;
+            const container = btnElement.closest('.d-flex.align-items-start');
             const textarea = container.querySelector('textarea');
-            
             if (!textarea) return;
 
-            // テキストエリアの値をコピー
-            const textToCopy = textarea.value;
-
-            navigator.clipboard.writeText(textToCopy).then(() => {
-                // 成功時の演出
+            navigator.clipboard.writeText(textarea.value).then(() => {
                 const originalContent = btnElement.innerHTML;
-                
-                // アイコンをチェックマークに変更
                 btnElement.innerHTML = "✅";
-                btnElement.style.color = "#198754"; // 緑色
-                
-                // 2秒後に元に戻す
+                btnElement.style.color = "#4ade80";
                 setTimeout(() => {
                     btnElement.innerHTML = originalContent;
-                    btnElement.style.color = ""; // 色をリセット
-                }, 2000);
+                    btnElement.style.color = "";
+                }, 1000);
+            });
+        }
 
-            }).catch(err => {
-                console.error('コピー失敗:', err);
-                alert('コピーに失敗しました');
+        function deleteRow(btnElement) {
+            const row = btnElement.closest('tr');
+            row.style.transition = 'all 0.3s ease';
+            row.style.opacity = '0';
+            row.style.transform = 'translateX(20px)';
+            setTimeout(() => {
+                row.remove();
+            }, 300);
+        }
+
+        function copyAllText() {
+            const textareas = document.querySelectorAll('.ocr-textarea');
+            let allText = "";
+            textareas.forEach(ta => {
+                allText += ta.value + "\n";
+            });
+
+            if(!allText) {
+                alert('No text to copy.');
+                return;
+            }
+
+            navigator.clipboard.writeText(allText).then(() => {
+                alert('📋 All text copied to clipboard!');
             });
         }
     </script>
