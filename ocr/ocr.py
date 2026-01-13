@@ -57,7 +57,7 @@ class OcrEngine:
             self._ocr_model = PaddleOCR(
                 use_angle_cls=True,
                 lang='japan', 
-                enable_mkldnn=False, 
+                enable_mkldnn=True, 
                 det_limit_side_len=640,
                 rec_batch_num=100,
             )
@@ -158,6 +158,7 @@ class OcrEngine:
         print("⏳XX2. Running OCR on the image.")
         result = self.ocr.ocr(img)
 
+        log_resources("OCR Complete") # ★デバッグ
         raw_items = []
         if isinstance(result, list) and len(result) > 0:
             if result[0] is None:
