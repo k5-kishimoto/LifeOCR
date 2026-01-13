@@ -1,3 +1,18 @@
+import os
+import multiprocessing
+
+# --- CPU設定 ---
+try:
+    num_cores = str(multiprocessing.cpu_count())
+except Exception:
+    num_cores = '1'
+
+os.environ['OMP_NUM_THREADS'] = num_cores
+os.environ['MKL_NUM_THREADS'] = num_cores
+os.environ['PADDLE_NUM_THREADS'] = num_cores
+
+print(f"🚀 CPU Optimization: Using {num_cores} threads.")
+
 import numpy as np
 import cv2
 from pdf2image import convert_from_bytes
