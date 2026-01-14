@@ -2,9 +2,11 @@
 """Django's command-line utility for administrative tasks."""
 import os
 import sys
-
+import dotenv  # 追加
 
 def main():
+    # .env ファイルを探して環境変数をロードする
+    dotenv.load_dotenv()  # 追加
     """Run administrative tasks."""
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'LifeOCR.settings')
     try:
