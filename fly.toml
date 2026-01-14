@@ -14,13 +14,13 @@ console_command = '/code/manage.py shell'
   # 1つのマシンの中でいくつのプロセスを動かすか
   # メモリ2GBのマシンなら「1」か「2」が限界です。
   # 安全のため「1」推奨（OCRはメモリを食うため）
-  WEB_CONCURRENCY = "1"
+  #WEB_CONCURRENCY = "1"
   # PaddleOCRの設定
-  OMP_NUM_THREADS = "1"
+  #OMP_NUM_THREADS = "1"
   # ログを即時出力させる（エラーが見やすくなります）
   PYTHONUNBUFFERED = "1"
   # 共有メモリのバグ回避
-  FLAGS_use_system_allocator = "1"
+  #FLAGS_use_system_allocator = "1"
 
 [http_service]
   internal_port = 8000
@@ -31,12 +31,12 @@ console_command = '/code/manage.py shell'
   # processes = ['app']
 
   # ★ここを追加・変更
-  [http_service.concurrency]
-    type = "requests"
+  #[http_service.concurrency]
+  #  type = "requests"
     # 同時に処理できる人数を「1」に制限する
     # 2人目が来たら、1人目が終わるまでFly.io側で待機させます（サーバーには負荷がかかりません）
-    hard_limit = 1
-    soft_limit = 1
+  #  hard_limit = 1
+  #  soft_limit = 1
 
 [[statics]]
   guest_path = '/code/static'
