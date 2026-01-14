@@ -9,11 +9,8 @@ console_command = '/code/manage.py shell'
 
 [build]
 
-# ★ここが重要：起動コマンドを明示的に指定します
+# プロセス定義（タイムアウト120秒、並列処理設定）
 [processes]
-  # --workers 2: プロセスを2つ起動
-  # --threads 4: 1プロセスあたり4スレッド（合計8リクエスト同時処理可能）
-  # --timeout 120: 処理待ち時間を120秒に延長
   app = "gunicorn --bind :8000 --workers 2 --threads 4 --timeout 120 lifeocr.wsgi"
 
 [env]
@@ -28,11 +25,13 @@ console_command = '/code/manage.py shell'
   auto_start_machines = true
   min_machines_running = 0
   
-  # ★ここを変更：複数アクセスを許可する設定
+  # ★★★ ここを追加（これがエラーの原因でした） ★★★
+  # 上の [processes] で定義した 'app' をこのサービスで使うと宣言します
+  processes = ['app']
+
+  # 複数アクセス許可設定
   [http_service.concurrency]
     type = "requests"
-    # 同時にアクセスできる人数を「25人」に増やす
-    # Gemini APIを待っている間はサーバー負荷はほぼゼロなので、これくらい増やしても大丈夫です
     hard_limit = 25
     soft_limit = 20
 
