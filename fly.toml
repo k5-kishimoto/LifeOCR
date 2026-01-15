@@ -11,7 +11,7 @@ console_command = '/code/manage.py shell'
 
 # プロセス定義（タイムアウト120秒、並列処理設定）
 [processes]
-  app = "gunicorn --bind :8000 --workers 1 --threads 8 --timeout 120 lifeocr.wsgi"
+  app = "gunicorn --bind :8000 --workers 1 --threads 8 --timeout 120 lifeOCR.wsgi"
 
 [env]
   PORT = '8000'
