@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>AI OCR Pro | Google Vision Engine</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
     
     <style>
         :root {
@@ -19,15 +19,14 @@
         body {
             background-color: var(--bg-color);
             color: var(--text-main);
-            font-family: 'Inter', sans-serif;
-            /* 背景の装飾 */
+            /* フォントに日本語を追加 */
+            font-family: 'Inter', 'Noto Sans JP', sans-serif;
             background-image: 
                 radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.15) 0px, transparent 50%),
                 radial-gradient(at 100% 100%, rgba(139, 92, 246, 0.15) 0px, transparent 50%);
             min-height: 100vh;
         }
 
-        /* ガラスのようなカードデザイン */
         .glass-card {
             background: var(--card-bg);
             backdrop-filter: blur(12px);
@@ -39,7 +38,6 @@
             margin-bottom: 2rem;
         }
 
-        /* アップロードエリア */
         .upload-area {
             border: 2px dashed #475569;
             border-radius: 12px;
@@ -57,7 +55,6 @@
             box-shadow: 0 0 20px rgba(59, 130, 246, 0.2);
         }
 
-        /* ボタン */
         .btn-gradient {
             background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
             border: none;
@@ -73,19 +70,20 @@
             color: white;
         }
 
-        /* 結果テーブル周り */
+        /* --- テキストエリア（通常・横書き） --- */
         .ocr-textarea {
             background-color: rgba(15, 23, 42, 0.6);
             border: 1px solid #334155;
             color: #e2e8f0;
             border-radius: 6px;
-            resize: none;
-            overflow: hidden;
+            resize: both; /* 縦書き時にサイズ調整しやすいようbothに変更 */
+            overflow: auto;
             min-height: 38px;
-            line-height: 1.5;
+            line-height: 1.6; /* 読みやすく少し広げる */
             font-size: 0.95rem;
             transition: all 0.2s;
             min-width: 200px;
+            font-family: 'Noto Sans JP', sans-serif;
         }
         .ocr-textarea:focus {
             background-color: #1e293b;
@@ -94,22 +92,28 @@
             outline: none;
         }
 
-        /* アイコンボタン（修正版） */
+        /* --- ★縦書きモード用クラス --- */
+        .tategaki-mode {
+            writing-mode: vertical-rl; /* 縦書き（右から左） */
+            text-orientation: upright; /* 英数字も正立 */
+            min-height: 200px !important; /* 縦に長さを確保 */
+            width: 100%;
+            padding: 10px;
+            line-height: 2.0; /* 縦書きは行間広めが読みやすい */
+        }
+
+        /* アイコンボタン */
         .action-btn {
             background: transparent;
             border: none;
             color: var(--text-sub);
-            /* サイズを固定して小さくする */
-            width: 14px; 
-            height: 14px;
+            width: 24px; 
+            height: 24px;
             font-size: 12px;
-            
-            /* アイコンを中央に配置 */
             display: flex;
             align-items: center;
             justify-content: center;
             padding: 0;
-            
             border-radius: 4px;
             transition: all 0.2s;
         }
@@ -117,7 +121,6 @@
         .btn-copy:hover { color: #4ade80; }
         .btn-delete:hover { color: #f87171; }
 
-        /* プレビュー */
         #preview-container {
             display: none;
             margin-bottom: 1.5rem;
@@ -126,7 +129,6 @@
         #preview-img { max-height: 300px; max-width: 100%; border-radius: 8px; border: 2px solid #334155; }
         #preview-pdf { width: 100%; height: 500px; border-radius: 8px; border: 2px solid #334155; }
 
-        /* ローディングオーバーレイ */
         #loading-overlay {
             position: fixed;
             top: 0; left: 0; width: 100%; height: 100%;
@@ -162,7 +164,7 @@
             <h1 class="fw-bold display-5 bg-gradient-to-r text-transparent bg-clip-text" style="background: linear-gradient(to right, #fff, #94a3b8); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
                 AI OCR Pro
             </h1>
-            <p class="text-muted">High-precision document digitization powered</p>
+            <p class="text-muted">High-precision document digitization powered by Gemini 2.5</p>
         </div>
 
         <div class="glass-card">
@@ -182,8 +184,8 @@
                     
                     <div class="pointer-events-none">
                         <div class="display-4 mb-2">☁️</div>
-                        <h5 class="fw-bold text-white">ファイルをドロップしてください</h5>
-                        <p class="text-muted small mb-0">Supports JPG, PNG, PDF</p>
+                        <h5 class="fw-bold text-white">Drop your file here</h5>
+                        <p class="text-muted small mb-0">Supports JPG, PNG, PDF (Vertical Text Ready)</p>
                     </div>
                 </div>
 
@@ -200,6 +202,7 @@
             <div class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom border-secondary">
                 <h5 class="m-0 fw-bold">Analysis Results</h5>
                 <div class="d-flex gap-2">
+                    <button type="button" class="btn btn-outline-info btn-sm" onclick="toggleVerticalMode()">↕️ 縦書き切替</button>
                     <button type="button" class="btn btn-outline-light btn-sm" onclick="copyAllText()">📋 Copy All</button>
                     <button type="button" class="btn btn-success btn-sm" onclick="downloadCSV()">📥 CSV Download</button>
                 </div>
@@ -219,9 +222,9 @@
                                         </div>
                                     {% else %}
                                         <textarea class="form-control ocr-textarea flex-grow-1" 
-                                                  rows="1" oninput="adjustHeight(this)">{{ cell.text }}</textarea>
+                                                  rows="1">{{ cell.text }}</textarea>
                                         
-                                        <div class="d-flex flex-column gap-1">
+                                        <div class="d-flex flex-column gap-0">
                                             <button type="button" class="action-btn btn-copy" onclick="copyCell(this)" title="Copy">📋</button>
                                             <button type="button" class="action-btn btn-delete" onclick="deleteRow(this)" title="Delete Row">🗑️</button>
                                         </div>
@@ -241,22 +244,41 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        // ローディング表示
         function showLoading() {
             document.getElementById('loading-overlay').style.display = 'flex';
         }
 
-        // テキストエリアの高さ自動調整
+        // 高さ自動調整（横書き時のみ有効にするのが安全）
         function adjustHeight(el) {
-            el.style.height = 'auto';
-            el.style.height = (el.scrollHeight + 2) + 'px';
+            if (!el.classList.contains('tategaki-mode')) {
+                el.style.height = 'auto';
+                el.style.height = (el.scrollHeight + 2) + 'px';
+            }
         }
-        // 初期読み込み時に高さ調整
+
         document.addEventListener("DOMContentLoaded", () => {
-            document.querySelectorAll('.ocr-textarea').forEach(adjustHeight);
+            // 初期は横書きとして高さ調整
+            document.querySelectorAll('.ocr-textarea').forEach(el => {
+                adjustHeight(el);
+                el.addEventListener('input', () => adjustHeight(el));
+            });
         });
 
-        // プレビュー機能
+        // ★縦書き切り替え機能
+        function toggleVerticalMode() {
+            const textareas = document.querySelectorAll('.ocr-textarea');
+            textareas.forEach(el => {
+                el.classList.toggle('tategaki-mode');
+                
+                // 切り替え時のスタイルリセット
+                if (el.classList.contains('tategaki-mode')) {
+                    el.style.height = '300px'; // 縦書き時は固定高さを与える（スクロールさせる）
+                } else {
+                    adjustHeight(el); // 横書きに戻ったら自動調整
+                }
+            });
+        }
+
         const fileInput = document.getElementById('file-input');
         const previewContainer = document.getElementById('preview-container');
         const previewImg = document.getElementById('preview-img');
@@ -280,7 +302,6 @@
             }
         });
 
-        // ドラッグ＆ドロップのスタイル制御
         const dropZone = document.getElementById('drop-zone');
         ['dragenter', 'dragover'].forEach(eventName => {
             dropZone.addEventListener(eventName, (e) => {
@@ -298,11 +319,9 @@
             const dt = e.dataTransfer;
             const files = dt.files;
             fileInput.files = files;
-            // changeイベントを手動発火してプレビューを表示
             fileInput.dispatchEvent(new Event('change'));
         });
 
-        // アクション: セルコピー
         function copyCell(btn) {
             const textarea = btn.closest('td').querySelector('textarea');
             navigator.clipboard.writeText(textarea.value).then(() => {
@@ -312,7 +331,6 @@
             });
         }
 
-        // アクション: 行削除
         function deleteRow(btn) {
             if(confirm('Delete this row?')) {
                 const row = btn.closest('tr');
@@ -320,29 +338,24 @@
             }
         }
 
-        // アクション: 全コピー
         function copyAllText() {
             const textareas = document.querySelectorAll('.ocr-textarea');
             const texts = Array.from(textareas).map(ta => ta.value).join('\n');
             navigator.clipboard.writeText(texts).then(() => alert('Copied all text!'));
         }
 
-        // アクション: CSVダウンロード
         function downloadCSV() {
             const rows = document.querySelectorAll('#ocr-table tbody tr');
-            let csv = '\uFEFF'; // BOM for Excel
-
+            let csv = '\uFEFF'; 
             rows.forEach(row => {
                 const cols = row.querySelectorAll('textarea');
-                if (cols.length === 0) return; // ヘッダー行などはスキップ
-                
+                if (cols.length === 0) return;
                 const rowData = Array.from(cols).map(c => {
-                    let text = c.value.replace(/"/g, '""'); // エスケープ処理
+                    let text = c.value.replace(/"/g, '""');
                     return `"${text}"`;
                 });
                 csv += rowData.join(',') + '\n';
             });
-
             const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
