@@ -94,10 +94,20 @@ class OcrEngine:
                 # アプリ形式に変換
                 formatted_rows = []
                 for row in data_list:
+                    # Noneや "null" 文字列を空文字にするヘルパー関数
+                    def clean_text(val):
+                        if val is None:
+                            return ""
+                        s = str(val)
+                        # AIが文字として "null" や "None" を返してきた場合も消す
+                        if s.lower() in ["null", "none"]:
+                            return ""
+                        return s
+
                     if isinstance(row, list):
-                        formatted_cells = [{'text': str(cell)} for cell in row]
+                        formatted_cells = [{'text': clean_text(cell)} for cell in row]
                     else:
-                        formatted_cells = [{'text': str(row)}]
+                        formatted_cells = [{'text': clean_text(row)}]
                     formatted_rows.append(formatted_cells)
                 
                 print(f"✅ Success ({page_label}) with {current_model_name}")
