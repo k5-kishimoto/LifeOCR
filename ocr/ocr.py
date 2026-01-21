@@ -23,8 +23,7 @@ class OcrEngine:
         try:
             genai.configure(api_key=self.api_key)
             
-            # ★デフォルトを最新の 'gemini-2.5-flash' に設定
-            # これが現在利用可能な中で最もバランスが良いモデルです
+            # デフォルトを最新の 'gemini-2.5-flash' に設定
             self.model_name = os.environ.get("GEMINI_VERSION", "gemini-2.5-flash")
             
             self.model = genai.GenerativeModel(self.model_name)
@@ -35,42 +34,44 @@ class OcrEngine:
 
     def _optimize_image(self, img):
         """
-        画像をAIに送りやすいサイズに軽量化（高速化の鍵）
+        画像をAIに送りやすいサイズに軽量化
         """
-        max_size = 1800 # 長辺1800pxあればOCRには十分
-        
+        max_size = 1800 
         if max(img.size) > max_size:
-            # 高速なリサイズアルゴリズムを使用
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-        
         return img
 
     def _process_single_page(self, args):
         """
-        1ページ分を処理する関数（並列処理用）
+        1ページ分を処理する関数
         """
         page_label, pil_image = args
         
         # 画像の軽量化
         optimized_image = self._optimize_image(pil_image)
 
+        # ★ここが変更点: 縦書き対応プロンプト
         prompt = """
-        Extract data from the table in the image.
-        Output ONLY a JSON 2D array (list of lists).
-        Example: [["Header1", "Header2"], ["Value1", "Value2"]]
-        Do NOT use markdown. Just JSON.
-        If no table, return list containing rows of text.
+        Analyze the document image and extract text/data into a JSON 2D array.
+        
+        [Rules]
+        1. Detect the text direction automatically:
+           - If Horizontal (Yokogaki): Read Top-to-Bottom, Left-to-Right.
+           - If Vertical (Tategaki): Read Right-to-Left columns, Top-to-Bottom characters.
+        2. Preserve the table structure if present.
+        3. Output ONLY a valid JSON 2D array (list of lists).
+           Example: [["Title", "Author"], ["吾輩は猫である", "夏目漱石"]]
+        4. Do NOT use markdown code blocks. Return raw JSON only.
         """
 
-        # ★最強の布陣：利用可能なモデルからベストな順序を選定
+        # 最強の布陣
         retry_models = [
-            self.model_name,            # 1. gemini-2.5-flash (本命)
-            'gemini-2.5-flash-lite',    # 2. gemini-2.5-flash-lite (爆速バックアップ)
-            'gemini-2.0-flash',         # 3. gemini-2.0-flash (安定版)
-            'gemini-3-flash-preview'    # 4. gemini-3 (次世代プレビュー)
+            self.model_name,            # 1. gemini-2.5-flash
+            'gemini-2.5-flash-lite',    # 2. 軽量版
+            'gemini-2.0-flash',         # 3. 安定版
+            'gemini-3-flash-preview'    # 4. 次世代
         ]
         
-        # 重複削除（念のため）
         retry_models = list(dict.fromkeys(retry_models))
 
         for current_model_name in retry_models:
@@ -106,7 +107,6 @@ class OcrEngine:
                 error_msg = str(e)
                 print(f"⚠️ Failed ({page_label}) with {current_model_name}: {error_msg}")
                 
-                # 致命的なエラー以外は次のモデルへ
                 if "404" in error_msg or "not found" in error_msg or "429" in error_msg or "500" in error_msg:
                     continue
                 else:
@@ -116,7 +116,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Multi-Thread Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Vertical Support Mode...")
         
         if not self.model:
             return [[{'text': "Error: AI Model not initialized."}]]
@@ -131,10 +131,8 @@ class OcrEngine:
             
         images_to_process = [] 
 
-        # --- 画像変換 ---
         if filename.endswith('.pdf'):
             try:
-                # 速度優先設定 (dpi=150)
                 pil_images = convert_from_bytes(file_bytes, dpi=150, fmt='jpeg')
                 for i, img in enumerate(pil_images):
                     images_to_process.append((f"Page {i+1}", img))
@@ -147,8 +145,6 @@ class OcrEngine:
 
         final_results = []
 
-        # ★並列処理 (Multi-Threading)
-        # 画像枚数が多い場合でも一気に処理します
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             future_to_page = {executor.submit(self._process_single_page, item): item[0] for item in images_to_process}
             
@@ -157,7 +153,6 @@ class OcrEngine:
                 page_label, page_data = future.result()
                 results_dict[page_label] = page_data
 
-        # ページ順に結合
         for label, _ in images_to_process:
             if len(images_to_process) > 1:
                 final_results.append([{'text': f'--- {label} ---', 'is_header': True}])
