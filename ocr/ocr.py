@@ -22,10 +22,7 @@ class OcrEngine:
 
         try:
             genai.configure(api_key=self.api_key)
-            
-            # デフォルトを最新の 'gemini-2.5-flash' に設定
             self.model_name = os.environ.get("GEMINI_VERSION", "gemini-2.5-flash")
-            
             self.model = genai.GenerativeModel(self.model_name)
             print(f"⚙️ Initial Model config: {self.model_name}")
 
@@ -33,50 +30,48 @@ class OcrEngine:
             print(f"❌ API Configuration Error: {e}")
 
     def _optimize_image(self, img):
-        """
-        画像をAIに送りやすいサイズに軽量化
-        """
         max_size = 1800 
         if max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
         return img
 
     def _process_single_page(self, args):
-        """
-        1ページ分を処理する関数
-        """
         page_label, pil_image = args
-        
-        # 画像の軽量化
         optimized_image = self._optimize_image(pil_image)
 
-        # ★ここが変更点: 縦書き対応プロンプト
+        # ★★★ プロンプトを大幅強化（ここが変わりました） ★★★
         prompt = """
-        Analyze the document image and extract text/data into a JSON 2D array.
-        
-        [Rules]
-        1. Detect the text direction automatically:
-           - If Horizontal (Yokogaki): Read Top-to-Bottom, Left-to-Right.
-           - If Vertical (Tategaki): Read Right-to-Left columns, Top-to-Bottom characters.
-        2. Preserve the table structure if present.
-        3. Output ONLY a valid JSON 2D array (list of lists).
-           Example: [["Title", "Author"], ["吾輩は猫である", "夏目漱石"]]
-        4. Do NOT use markdown code blocks. Return raw JSON only.
+        You are a high-precision OCR engine specialized in Japanese documents.
+        Your task is to transcribe the text in the image into a JSON 2D array.
+
+        [Strict Rules]
+        1. **Text Direction**: Automatically detect vertical (Tategaki) or horizontal (Yokogaki).
+           - Vertical: Read columns right-to-left.
+           - Horizontal: Read rows top-to-bottom.
+        2. **Structure**: Maintain the exact visual table structure.
+           - Output a list of lists: `[["Header1", "Header2"], ["Row1Col1", "Row1Col2"]]`.
+           - Ensure all rows have the consistent number of columns.
+        3. **Accuracy & Cleaning**:
+           - Transcribe exactly as written. Do not correct spelling.
+           - **Empty Cells**: If a cell is visually empty, return an empty string "". Do NOT return "null", "None", or "-".
+           - **Japanese Spacing**: Remove unnecessary whitespace between Japanese characters (e.g., convert "東 京" to "東京"). Keep spaces in English sentences.
+        4. **Output Format**: 
+           - Return RAW JSON only. 
+           - NO markdown code blocks (```json). 
+           - NO explanations.
         """
 
-        # 最強の布陣
         retry_models = [
-            self.model_name,            # 1. gemini-2.5-flash
-            'gemini-2.5-flash-lite',    # 2. 軽量版
-            'gemini-2.0-flash',         # 3. 安定版
-            'gemini-3-flash-preview'    # 4. 次世代
+            self.model_name,            
+            'gemini-2.5-flash-lite',    
+            'gemini-2.0-flash',         
+            'gemini-3-flash-preview'    
         ]
         
         retry_models = list(dict.fromkeys(retry_models))
 
         for current_model_name in retry_models:
             try:
-                # モデル設定
                 current_model = genai.GenerativeModel(current_model_name)
                 
                 # リクエスト送信
@@ -94,14 +89,11 @@ class OcrEngine:
                 # アプリ形式に変換
                 formatted_rows = []
                 for row in data_list:
-                    # Noneや "null" 文字列を空文字にするヘルパー関数
+                    # Python側での念のためのクリーニング
                     def clean_text(val):
-                        if val is None:
-                            return ""
-                        s = str(val)
-                        # AIが文字として "null" や "None" を返してきた場合も消す
-                        if s.lower() in ["null", "none"]:
-                            return ""
+                        if val is None: return ""
+                        s = str(val).strip() # 空白除去も追加
+                        if s.lower() in ["null", "none"]: return ""
                         return s
 
                     if isinstance(row, list):
@@ -126,7 +118,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Vertical Support Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - High Precision Mode...")
         
         if not self.model:
             return [[{'text': "Error: AI Model not initialized."}]]
