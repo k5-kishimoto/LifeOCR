@@ -39,26 +39,17 @@ class OcrEngine:
         page_label, pil_image = args
         optimized_image = self._optimize_image(pil_image)
 
-        # ★★★ プロンプトを大幅強化（ここが変わりました） ★★★
         prompt = """
         You are a high-precision OCR engine specialized in Japanese documents.
         Your task is to transcribe the text in the image into a JSON 2D array.
 
         [Strict Rules]
         1. **Text Direction**: Automatically detect vertical (Tategaki) or horizontal (Yokogaki).
-           - Vertical: Read columns right-to-left.
-           - Horizontal: Read rows top-to-bottom.
-        2. **Structure**: Maintain the exact visual table structure.
-           - Output a list of lists: `[["Header1", "Header2"], ["Row1Col1", "Row1Col2"]]`.
-           - Ensure all rows have the consistent number of columns.
-        3. **Accuracy & Cleaning**:
-           - Transcribe exactly as written. Do not correct spelling.
-           - **Empty Cells**: If a cell is visually empty, return an empty string "". Do NOT return "null", "None", or "-".
-           - **Japanese Spacing**: Remove unnecessary whitespace between Japanese characters (e.g., convert "東 京" to "東京"). Keep spaces in English sentences.
-        4. **Output Format**: 
-           - Return RAW JSON only. 
-           - NO markdown code blocks (```json). 
-           - NO explanations.
+        2. **Structure**: Maintain the exact visual table structure. Output a list of lists.
+        3. **Accuracy**: Transcribe exactly as written.
+           - Empty Cells: Return empty string "". Do NOT return "null".
+           - Remove unnecessary whitespace between Japanese characters.
+        4. **Output Format**: Return RAW JSON only. NO markdown.
         """
 
         retry_models = [
@@ -78,21 +69,48 @@ class OcrEngine:
                 response = current_model.generate_content([prompt, optimized_image])
                 raw_text = response.text
                 
-                # JSON抽出
-                json_match = re.search(r'\[.*\]', raw_text, re.DOTALL)
-                if json_match:
-                    clean_json = json_match.group(0)
-                    data_list = json.loads(clean_json)
-                else:
-                    data_list = [[line] for line in raw_text.split('\n') if line.strip()]
+                data_list = []
+                
+                # --- ★★★ JSON解析ロジックの大幅強化 ★★★ ---
+                try:
+                    # 1. まず標準的な抽出を試みる
+                    json_match = re.search(r'\[.*\]', raw_text, re.DOTALL)
+                    if json_match:
+                        clean_json = json_match.group(0)
+                        data_list = json.loads(clean_json)
+                    else:
+                        raise ValueError("No JSON found")
+
+                except (json.JSONDecodeError, ValueError):
+                    # 2. 【リカバリーモード】JSONが壊れている場合
+                    print(f"⚠️ JSON Broken on {page_label}. Attempting recovery...")
+                    
+                    # 行単位（内側の [ ... ] ）で正規表現抽出を試みる
+                    # 外枠が壊れていても、中身の行さえ取れればOK
+                    rows = re.findall(r'\[(.*?)\]', raw_text)
+                    
+                    if rows:
+                        for r in rows:
+                            try:
+                                # 各行を個別にJSONパースしてみる
+                                # "Col1", "Col2" のような文字列をリスト化
+                                # カッコを補完してパース
+                                row_data = json.loads(f"[{r}]")
+                                data_list.append(row_data)
+                            except:
+                                # パースできない行はそのまま文字列として追加
+                                data_list.append([r])
+                    else:
+                        # 3. それでもダメなら単なる改行区切りテキストとして処理
+                        data_list = [[line] for line in raw_text.split('\n') if line.strip()]
+                # ----------------------------------------------------
 
                 # アプリ形式に変換
                 formatted_rows = []
                 for row in data_list:
-                    # Python側での念のためのクリーニング
                     def clean_text(val):
                         if val is None: return ""
-                        s = str(val).strip() # 空白除去も追加
+                        s = str(val).strip()
                         if s.lower() in ["null", "none"]: return ""
                         return s
 
@@ -118,7 +136,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - High Precision Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Robust JSON Mode...")
         
         if not self.model:
             return [[{'text': "Error: AI Model not initialized."}]]
