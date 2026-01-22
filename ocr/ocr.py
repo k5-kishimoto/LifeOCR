@@ -46,13 +46,13 @@ class OcrEngine:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Smart-Dedupe Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Merge-Update Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
 
     # =========================================================================
-    # 🧹 クリーニング & 指紋生成
+    # 🧹 クリーニング & 判定
     # =========================================================================
     
     def _clean_text(self, val):
@@ -65,7 +65,7 @@ class OcrEngine:
         return val.strip()
 
     def _is_header_row(self, row):
-        """ヘッダー行っぽいものを判定して除外するため"""
+        """ヘッダー行判定（Bottom側の不要なヘッダー除去用）"""
         header_keywords = ["日付", "摘要", "金額", "入金", "出金", "残高", "借方", "貸方", "区分", "支店名"]
         match_count = 0
         for cell in row:
@@ -74,28 +74,28 @@ class OcrEngine:
                 match_count += 1
         return match_count >= 2
 
-    def _get_row_fingerprint(self, row):
+    def _is_same_transaction(self, row1, row2):
         """
-        行のユニークさを判定するための指紋を作成
-        「日付」と「金額（数値）」の組み合わせを使う
-        例: "2025/10/10_10000"
+        2つの行が「同じ取引」か判定する。
+        日付と金額が含まれていて、それが一致すれば同一とみなす。
         """
-        parts = []
-        for cell in row:
-            text = self._clean_text(cell)
-            # 日付 (yyyy/mm/dd または yyyy-mm-dd)
-            if re.search(r'\d{4}[/-年]\d{1,2}[/-月]\d{1,2}', text):
-                parts.append(text)
-            # 金額 (3桁区切り)
-            elif re.search(r'\d{1,3}(,\d{3})+', text) or (text.isdigit() and len(text) > 2):
-                parts.append(text.replace(",", ""))
-        
-        # 名前（カタカナ）も指紋に含める（同日・同額の別人対策）
-        name_match = [c for c in row if re.search(r'[ｱ-ﾝﾞﾟ]{2,}', str(c))]
-        if name_match:
-            parts.append(self._clean_text(name_match[0]))
+        # テキスト抽出
+        r1_text = "".join([self._clean_text(c) for c in row1])
+        r2_text = "".join([self._clean_text(c) for c in row2])
 
-        return "_".join(sorted(parts))
+        # 日付抽出 (YYYY/MM/DD)
+        date1 = re.search(r'\d{4}[/-年]\d{1,2}[/-月]\d{1,2}', r1_text)
+        date2 = re.search(r'\d{4}[/-年]\d{1,2}[/-月]\d{1,2}', r2_text)
+        
+        # 金額抽出 (3桁以上の数字)
+        amt1 = re.search(r'\d{1,3}(,\d{3})+', r1_text)
+        amt2 = re.search(r'\d{1,3}(,\d{3})+', r2_text)
+
+        # 判定
+        if date1 and date2 and date1.group() == date2.group():
+            if amt1 and amt2 and amt1.group() == amt2.group():
+                return True
+        return False
 
     # =========================================================================
     # 🖼️ 画像処理
@@ -205,7 +205,7 @@ class OcrEngine:
         return None
 
     # =========================================================================
-    # 🔄 スマート結合・重複排除（指紋マッチング）
+    # 🔄 合成マージ（上書き更新ロジック）
     # =========================================================================
 
     def _merge_split_results(self, results):
@@ -217,48 +217,64 @@ class OcrEngine:
             combined_json["document_info"] = results[target_source].get("document_info", {})
             combined_json["table_headers"] = results[target_source].get("table_headers", [])
 
-        # --- 結合ロジック ---
+        # --- マージ処理 ---
         final_rows = []
-        seen_fingerprints = set() # 既に登録された行の「指紋」を記録
-
-        # 1. Topの行を処理
+        
+        # 1. Topの行をすべて追加
         top_rows = results.get("Top", {}).get("table_rows", [])
         for row in top_rows:
             if not row or all(str(c).strip() == "" for c in row): continue
-            
-            # ヘッダー行ならスキップ
             if self._is_header_row(row): continue
-
-            cleaned_row = [self._clean_text(c) for c in row]
             
-            # 指紋を作成して記録
-            fp = self._get_row_fingerprint(cleaned_row)
-            if fp: 
-                seen_fingerprints.add(fp)
-            
-            final_rows.append(cleaned_row)
+            cleaned = [self._clean_text(c) for c in row]
+            final_rows.append(cleaned)
 
-        # 2. Bottomの行を処理
+        # 2. Bottomの行をチェック
         bottom_rows = results.get("Bottom", {}).get("table_rows", [])
-        for row in bottom_rows:
-            if not row or all(str(c).strip() == "" for c in row): continue
-            
-            # ヘッダー行ならスキップ
-            if self._is_header_row(row): continue
+        
+        for b_row in bottom_rows:
+            if not b_row or all(str(c).strip() == "" for c in b_row): continue
+            if self._is_header_row(b_row): continue
 
-            cleaned_row = [self._clean_text(c) for c in row]
+            b_cleaned = [self._clean_text(c) for c in b_row]
             
-            # 指紋を作成
-            fp = self._get_row_fingerprint(cleaned_row)
+            # 既存の行と重複しているかチェック
+            matched_index = -1
             
-            # 指紋が既にTopにある場合（＝重複行）
-            if fp and fp in seen_fingerprints:
-                # 既存の行よりも情報量が多い（列が多い、文字数が多い）場合のみ差し替えたいが、
-                # 順序が狂うリスクがあるので、基本的には「Topにあるものを優先」して、Bottom側は捨てる
-                continue 
+            # Bottomは下半分なので、Topの「後ろの方」と重複する可能性が高い
+            # 後ろから順に探すことで効率化＆誤爆防止
+            search_range = range(len(final_rows) - 1, max(-1, len(final_rows) - 10), -1)
             
-            # 指紋がない（日付も金額もない）行、または新しい行なら追加
-            final_rows.append(cleaned_row)
+            for i in search_range:
+                t_row = final_rows[i]
+                if self._is_same_transaction(t_row, b_cleaned):
+                    matched_index = i
+                    break
+            
+            if matched_index != -1:
+                # ★重要変更点: 重複が見つかったら、より情報量が多いセルで「上書き」する
+                existing_row = final_rows[matched_index]
+                merged_row = []
+                
+                # 長い方を採用して合成する（セル単位のマージ）
+                # 例: Top["", "100"] + Bottom["摘要あり", "100"] -> Result["摘要あり", "100"]
+                max_cols = max(len(existing_row), len(b_cleaned))
+                
+                for i in range(max_cols):
+                    val_t = existing_row[i] if i < len(existing_row) else ""
+                    val_b = b_cleaned[i] if i < len(b_cleaned) else ""
+                    
+                    # 文字数が長い方を採用（情報量が多いとみなす）
+                    if len(val_b) > len(val_t):
+                        merged_row.append(val_b)
+                    else:
+                        merged_row.append(val_t)
+                
+                # 更新
+                final_rows[matched_index] = merged_row
+            else:
+                # 新規行なら追加
+                final_rows.append(b_cleaned)
 
         combined_json["table_rows"] = final_rows
         return combined_json, len(final_rows)
@@ -337,7 +353,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Smart-Dedupe Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Merge-Update Mode...")
         if not self.model: return [[{'text': "Error: AI Model not initialized."}]]
 
         uploaded_file.seek(0)
