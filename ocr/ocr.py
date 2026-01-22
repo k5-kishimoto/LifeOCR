@@ -35,13 +35,14 @@ class OcrEngine:
                 model_name=self.model_name,
                 generation_config=self.generation_config
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Robust Text Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Header-Focus Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
 
     def _optimize_image(self, img):
-        max_size = 2560 
+        # 画像の四隅までくっきりさせるために高解像度維持
+        max_size = 3200 
         if max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
         
@@ -50,7 +51,7 @@ class OcrEngine:
         
         img = ImageOps.autocontrast(img, cutoff=1)
         enhancer = ImageEnhance.Sharpness(img)
-        img = enhancer.enhance(1.4) 
+        img = enhancer.enhance(1.3) 
         
         return img
 
@@ -60,34 +61,41 @@ class OcrEngine:
         optimized_image = self._optimize_image(pil_image)
         
         img_byte_arr = io.BytesIO()
-        optimized_image.save(img_byte_arr, format='WEBP', quality=90)
+        optimized_image.save(img_byte_arr, format='WEBP', quality=100, lossless=True)
         img_bytes = img_byte_arr.getvalue()
         
         image_part = {"mime_type": "image/webp", "data": img_bytes}
 
+        # ★ここを大幅強化：ヘッダー探索の指示を追加
         prompt = """
         あなたは高精度の日本語OCRエンジンです。
-        提供された画像からテキスト情報を抽出し、JSONデータを返してください。
+        画像から全テキスト情報を抽出し、JSONを返してください。
 
-        【最重要ルール：文字種の維持】
-        1. **半角カナは「半角」のまま出力すること**: `ﾌﾘｺﾐ` は `ﾌﾘｺﾐ` のまま。
-        2. **記号の維持**: `ｶ)` や `ﾋ)` もそのまま。
+        【最重要：スキャン手順】
+        1. **ヘッダー領域の完全スキャン**:
+           - まず、**画像の最上部、左上、右上**を注意深く見てください。
+           - 「ロゴマーク」や「小さな文字」で書かれた **銀行名・金融機関名** を必ず見つけ出してください。
+           - 「支店名」や「取扱店」もヘッダー付近にある場合が多いので見逃さないでください。
+        2. **表データの抽出**:
+           - その後、メインの表データを読み取ってください。
+
+        【重要ルール】
+        1. **文字種の維持**: 半角カナ(`ﾌﾘｺﾐ`)は半角のまま。全角変換禁止。
+        2. **空白の維持**: 氏名の間のスペース(`ﾔﾏﾀﾞ ﾀﾛｳ`)は削除しない。
         
-        【タスク】
-        1. **文書情報**: タイトル、銀行名、支店名、口座名義、期間などを抽出。
-        2. **表データ**: 明細行をすべて抽出。
-
         【出力フォーマット (JSON)】
         {
           "document_info": {
-             "title": "文書タイトル",
-             "bank_name": "銀行名",
+             "bank_name": "銀行名（ロゴやヘッダーから抽出）",
+             "branch_name": "支店名（見つからなければ空文字）",
+             "title": "文書タイトル（入出金明細など）",
              "account_name": "口座名義",
-             "other_info": "その他メタデータ"
+             "period": "期間・日付情報",
+             "other_info": "その他（支店コードや口座番号など）"
           },
           "table_headers": ["日付", "摘要", "お支払金額", "お預り金額", "差引残高", "取扱店"],
           "table_rows": [
-             ["2026-01-22", "ﾌﾘｺﾐ ﾔﾏﾀﾞﾀﾛｳ", "10,000", "", "50,000", "本店"]
+             ["2026-01-22", "ﾌﾘｺﾐ ﾔﾏﾀﾞ ﾀﾛｳ", "10,000", "", "50,000", "本店"]
           ]
         }
         """
@@ -121,33 +129,41 @@ class OcrEngine:
 
                     parsed_json = json.loads(cleaned_text)
                     
-                    # 1. 文書情報
-                    doc_info = parsed_json.get("document_info", {})
-                    
-                    # ★修正箇所: 強制的に文字列化してエラーを防ぐ関数
                     def safe_str(val):
                         if val is None: return ""
-                        if isinstance(val, (dict, list)):
-                            return str(val) # 辞書やリストならそのまま文字列表現にする
+                        if isinstance(val, (dict, list)): return str(val)
                         return str(val).strip()
 
-                    if doc_info.get("title"):
-                        formatted_rows.append([{'text': f"■ {safe_str(doc_info['title'])}", 'is_header': True}])
+                    # 1. 文書情報（銀行名・支店名を強調表示）
+                    doc_info = parsed_json.get("document_info", {})
                     
+                    # タイトル行
+                    title_text = safe_str(doc_info.get('title')) or "明細書"
+                    formatted_rows.append([{'text': f"■ {title_text}", 'is_header': True}])
+                    
+                    # 銀行情報行（ここをリッチにする）
+                    bank_info = []
+                    if doc_info.get("bank_name"): bank_info.append(f"🏦 {safe_str(doc_info['bank_name'])}")
+                    if doc_info.get("branch_name"): bank_info.append(f"🏢 {safe_str(doc_info['branch_name'])}")
+                    
+                    if bank_info:
+                        formatted_rows.append([{'text': " ".join(bank_info)}])
+
+                    # 口座・その他情報行
                     meta_texts = []
-                    if doc_info.get("bank_name"): meta_texts.append(safe_str(doc_info["bank_name"]))
                     if doc_info.get("account_name"): meta_texts.append(f"名義: {safe_str(doc_info['account_name'])}")
-                    if doc_info.get("other_info"): meta_texts.append(safe_str(doc_info["other_info"]))
+                    if doc_info.get("period"): meta_texts.append(f"期間: {safe_str(doc_info['period'])}")
+                    if doc_info.get("other_info"): meta_texts.append(safe_str(doc_info['other_info']))
                     
                     if meta_texts:
-                        # ここで join する要素が全て文字列であることが保証されるためエラーにならない
                         formatted_rows.append([{'text': " / ".join(meta_texts)}])
-                        formatted_rows.append([{'text': ""}])
+                    
+                    # 空行を入れる
+                    formatted_rows.append([{'text': ""}])
 
                     # 2. ヘッダー
                     headers = parsed_json.get("table_headers", [])
                     if headers:
-                        # ヘッダー内も辞書が混じらないようにケア
                         clean_headers = [safe_str(h) for h in headers]
                         formatted_rows.append([{'text': h, 'is_header': True} for h in clean_headers])
 
@@ -156,8 +172,8 @@ class OcrEngine:
                     for row in rows:
                         def clean_text(val):
                             if val is None: return ""
-                            if isinstance(val, (dict, list)): return str(val) # ここも安全策
-                            s = str(val).strip()
+                            if isinstance(val, (dict, list)): return str(val)
+                            s = str(val).strip() 
                             if s.lower() in ["null", "none"]: return ""
                             return s
 
@@ -189,7 +205,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Robust Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Header-Focus Mode...")
         
         if not self.model:
             return [[{'text': "Error: AI Model not initialized."}]]
