@@ -35,15 +35,12 @@ class OcrEngine:
                 model_name=self.model_name,
                 generation_config=self.generation_config
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Half-width Kana Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Robust Text Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
 
     def _optimize_image(self, img):
-        """
-        半角カナのための画像補正
-        """
         max_size = 2560 
         if max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
@@ -51,10 +48,7 @@ class OcrEngine:
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
-        # 1. オートコントラストで文字を濃くする
         img = ImageOps.autocontrast(img, cutoff=1)
-        
-        # 2. ★変更点: シャープネスを少し強め(1.4倍)にして、細い半角カナの輪郭を立てる
         enhancer = ImageEnhance.Sharpness(img)
         img = enhancer.enhance(1.4) 
         
@@ -66,22 +60,18 @@ class OcrEngine:
         optimized_image = self._optimize_image(pil_image)
         
         img_byte_arr = io.BytesIO()
-        optimized_image.save(img_byte_arr, format='WEBP', quality=90) # 画質も少しアップ
+        optimized_image.save(img_byte_arr, format='WEBP', quality=90)
         img_bytes = img_byte_arr.getvalue()
         
         image_part = {"mime_type": "image/webp", "data": img_bytes}
 
-        # ★ここを修正：半角カナ維持のための強力な指示を追加
         prompt = """
         あなたは高精度の日本語OCRエンジンです。
-        提供された画像（通帳、銀行明細など）からテキスト情報を抽出し、JSONデータを返してください。
+        提供された画像からテキスト情報を抽出し、JSONデータを返してください。
 
         【最重要ルール：文字種の維持】
-        1. **半角カナは「半角」のまま出力すること**:
-           - 画像に `ﾌﾘｺﾐ` とあれば、必ず `ﾌﾘｺﾐ` と出力してください。
-           - 絶対に `フリコミ` (全角) に変換しないでください。
-        2. **記号の維持**:
-           - `ｶ)` や `ﾋ)` などの括弧付き記号もそのまま抽出してください。
+        1. **半角カナは「半角」のまま出力すること**: `ﾌﾘｺﾐ` は `ﾌﾘｺﾐ` のまま。
+        2. **記号の維持**: `ｶ)` や `ﾋ)` もそのまま。
         
         【タスク】
         1. **文書情報**: タイトル、銀行名、支店名、口座名義、期間などを抽出。
@@ -97,15 +87,14 @@ class OcrEngine:
           },
           "table_headers": ["日付", "摘要", "お支払金額", "お預り金額", "差引残高", "取扱店"],
           "table_rows": [
-             ["2026-01-22", "ﾌﾘｺﾐ ﾔﾏﾀﾞﾀﾛｳ", "10,000", "", "50,000", "本店"],
-             ["2026-01-23", "ﾃﾞﾝｷﾀﾞｲ", "5,000", "", "45,000", ""]
+             ["2026-01-22", "ﾌﾘｺﾐ ﾔﾏﾀﾞﾀﾛｳ", "10,000", "", "50,000", "本店"]
           ]
         }
         """
 
         retry_models = [
             self.model_name,
-            'gemini-2.5-pro', # 視力が良いので半角カナに強い
+            'gemini-2.5-pro',
             'gemini-2.0-flash'
         ]
         
@@ -134,28 +123,40 @@ class OcrEngine:
                     
                     # 1. 文書情報
                     doc_info = parsed_json.get("document_info", {})
+                    
+                    # ★修正箇所: 強制的に文字列化してエラーを防ぐ関数
+                    def safe_str(val):
+                        if val is None: return ""
+                        if isinstance(val, (dict, list)):
+                            return str(val) # 辞書やリストならそのまま文字列表現にする
+                        return str(val).strip()
+
                     if doc_info.get("title"):
-                        formatted_rows.append([{'text': f"■ {doc_info['title']}", 'is_header': True}])
+                        formatted_rows.append([{'text': f"■ {safe_str(doc_info['title'])}", 'is_header': True}])
                     
                     meta_texts = []
-                    if doc_info.get("bank_name"): meta_texts.append(doc_info["bank_name"])
-                    if doc_info.get("account_name"): meta_texts.append(f"名義: {doc_info['account_name']}")
-                    if doc_info.get("other_info"): meta_texts.append(doc_info["other_info"])
+                    if doc_info.get("bank_name"): meta_texts.append(safe_str(doc_info["bank_name"]))
+                    if doc_info.get("account_name"): meta_texts.append(f"名義: {safe_str(doc_info['account_name'])}")
+                    if doc_info.get("other_info"): meta_texts.append(safe_str(doc_info["other_info"]))
                     
                     if meta_texts:
+                        # ここで join する要素が全て文字列であることが保証されるためエラーにならない
                         formatted_rows.append([{'text': " / ".join(meta_texts)}])
                         formatted_rows.append([{'text': ""}])
 
                     # 2. ヘッダー
                     headers = parsed_json.get("table_headers", [])
                     if headers:
-                        formatted_rows.append([{'text': h, 'is_header': True} for h in headers])
+                        # ヘッダー内も辞書が混じらないようにケア
+                        clean_headers = [safe_str(h) for h in headers]
+                        formatted_rows.append([{'text': h, 'is_header': True} for h in clean_headers])
 
                     # 3. データ
                     rows = parsed_json.get("table_rows", [])
                     for row in rows:
                         def clean_text(val):
                             if val is None: return ""
+                            if isinstance(val, (dict, list)): return str(val) # ここも安全策
                             s = str(val).strip()
                             if s.lower() in ["null", "none"]: return ""
                             return s
@@ -188,7 +189,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Half-width Kana Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Robust Mode...")
         
         if not self.model:
             return [[{'text': "Error: AI Model not initialized."}]]
@@ -205,7 +206,6 @@ class OcrEngine:
 
         if filename.endswith('.pdf'):
             try:
-                # 半角カナは線が細いのでDPI 300必須
                 pil_images = convert_from_bytes(file_bytes, dpi=300, fmt='jpeg')
                 for i, img in enumerate(pil_images):
                     images_to_process.append((f"Page {i+1}", img))
