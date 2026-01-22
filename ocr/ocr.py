@@ -80,10 +80,6 @@ class OcrEngine:
            - 小さなロゴや印字も見逃さないこと。
         2. **表データの抽出**:
            - メインの明細データを読み取ってください。
-
-        【重要ルール】
-        1. **文字種の維持**: 半角カナ(`ﾌﾘｺﾐ`)は半角のまま。全角変換禁止。
-        2. **空白の維持**: 氏名の間のスペース(`ﾔﾏﾀﾞ ﾀﾛｳ`)は削除しない。
         
         【出力フォーマット (JSON)】
         {
@@ -220,8 +216,8 @@ class OcrEngine:
 
         if filename.endswith('.pdf'):
             try:
-                # PDF自体の変換解像度も少し下げてメモリ節約 (250dpi)
-                pil_images = convert_from_bytes(file_bytes, dpi=250, fmt='jpeg')
+                # PDF自体の変換解像度も少し下げてメモリ節約 (300dpi)
+                pil_images = convert_from_bytes(file_bytes, dpi=300, fmt='jpeg')
                 for i, img in enumerate(pil_images):
                     images_to_process.append((f"Page {i+1}", img))
             except Exception as e:
