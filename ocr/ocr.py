@@ -22,58 +22,99 @@ class OcrEngine:
 
         try:
             genai.configure(api_key=self.api_key)
+            # ★基本は最新の 2.5-flash を使用（精度と速度のバランスが最強）
             self.model_name = os.environ.get("GEMINI_VERSION", "gemini-2.5-flash")
-            self.model = genai.GenerativeModel(self.model_name)
-            print(f"⚙️ Initial Model config: {self.model_name}")
+            
+            # ★設定: 創造性はゼロにする（事実のみを抽出させるため精度アップ＆迷いなし）
+            self.generation_config = genai.types.GenerationConfig(
+                temperature=0.0, 
+                top_p=1.0,
+                max_output_tokens=8192,
+            )
+            
+            self.model = genai.GenerativeModel(
+                model_name=self.model_name,
+                generation_config=self.generation_config
+            )
+            print(f"⚙️ Initial Model config: {self.model_name} (Temp=0.0 / High-Res Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
 
     def _optimize_image(self, img):
-        max_size = 1800 
+        """
+        ★精度のための画像最適化
+        """
+        # 1. サイズ調整: 1800pxだと小さい文字が潰れることがあるため、2560pxまで許容
+        max_size = 2560 
         if max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        
+        # 2. カラー情報は保持する（グレースケール化は廃止）
+        # 赤字やマーカー、表の色分けなどの重要情報を捨てないようにします。
+        
         return img
 
     def _process_single_page(self, args):
         page_label, pil_image = args
+        
+        # 最適化（高解像度キープ）
         optimized_image = self._optimize_image(pil_image)
-        # OCRプロンプトの定義
+        
+        # ★通信速度対策: WebPの高画質設定(Quality=85)を使う
+        # JPEGより軽いが、画質劣化は人間の目では分からないレベル
+        img_byte_arr = io.BytesIO()
+        optimized_image.save(img_byte_arr, format='WEBP', quality=85)
+        img_bytes = img_byte_arr.getvalue()
+        
+        image_part = {"mime_type": "image/webp", "data": img_bytes}
+
+        # ★プロンプト: 精度重視の「厳格モード」を採用
         prompt = """
-        You are a high-precision OCR engine specialized in Japanese documents.
+        You are a high-precision OCR engine specialized in Japanese business documents.
         Your task is to transcribe the text in the image into a JSON 2D array.
 
         [Strict Rules]
         1. **Text Direction**: Automatically detect vertical (Tategaki) or horizontal (Yokogaki).
-        2. **Structure**: Maintain the exact visual table structure. Output a list of lists.
-        3. **Accuracy**: Transcribe exactly as written.
-           - Empty Cells: Return empty string "". Do NOT return "null".
-           - Remove unnecessary whitespace between Japanese characters.
-        4. **Output Format**: Return RAW JSON only. NO markdown.
+           - Vertical: Read columns right-to-left.
+           - Horizontal: Read rows top-to-bottom.
+        2. **Structure**: Maintain the exact visual table structure.
+           - Output a list of lists: `[["Header1", "Header2"], ["Row1Col1", "Row1Col2"]]`.
+        3. **Accuracy & Cleaning**:
+           - Transcribe exactly as written. Do not guess.
+           - **Empty Cells**: If a cell is visually empty, return an empty string "". Do NOT return "null", "None", or "-".
+           - **Japanese Spacing**: Remove unnecessary whitespace between Japanese characters (e.g., convert "東 京" to "東京"). Keep spaces in English sentences.
+        4. **Output Format**: 
+           - Return RAW JSON only. 
+           - NO markdown code blocks (```json). 
+           - NO explanations.
         """
 
+        # ★モデル優先順位の更新（提供リストに基づく）
         retry_models = [
-            self.model_name,            
-            'gemini-2.5-flash-lite',    
-            'gemini-2.0-flash',         
-            'gemini-3-flash-preview'    
+            self.model_name,            # 1. gemini-2.5-flash (本命・バランス型)
+            'gemini-2.5-pro',           # 2. gemini-2.5-pro (超高精度バックアップ)
+            'gemini-2.0-flash'          # 3. gemini-2.0-flash (安定版バックアップ)
         ]
         
         retry_models = list(dict.fromkeys(retry_models))
 
         for current_model_name in retry_models:
             try:
-                current_model = genai.GenerativeModel(current_model_name)
+                # 設定適用
+                current_model = genai.GenerativeModel(
+                    current_model_name,
+                    generation_config=self.generation_config
+                )
                 
                 # リクエスト送信
-                response = current_model.generate_content([prompt, optimized_image])
+                response = current_model.generate_content([prompt, image_part])
                 raw_text = response.text
                 
                 data_list = []
                 
-                # --- ★★★ JSON解析ロジックの大幅強化 ★★★ ---
+                # --- JSONリカバリーロジック ---
                 try:
-                    # 1. まず標準的な抽出を試みる
                     json_match = re.search(r'\[.*\]', raw_text, re.DOTALL)
                     if json_match:
                         clean_json = json_match.group(0)
@@ -82,28 +123,17 @@ class OcrEngine:
                         raise ValueError("No JSON found")
 
                 except (json.JSONDecodeError, ValueError):
-                    # 2. 【リカバリーモード】JSONが壊れている場合
                     print(f"⚠️ JSON Broken on {page_label}. Attempting recovery...")
-                    
-                    # 行単位（内側の [ ... ] ）で正規表現抽出を試みる
-                    # 外枠が壊れていても、中身の行さえ取れればOK
                     rows = re.findall(r'\[(.*?)\]', raw_text)
-                    
                     if rows:
                         for r in rows:
                             try:
-                                # 各行を個別にJSONパースしてみる
-                                # "Col1", "Col2" のような文字列をリスト化
-                                # カッコを補完してパース
                                 row_data = json.loads(f"[{r}]")
                                 data_list.append(row_data)
                             except:
-                                # パースできない行はそのまま文字列として追加
                                 data_list.append([r])
                     else:
-                        # 3. それでもダメなら単なる改行区切りテキストとして処理
                         data_list = [[line] for line in raw_text.split('\n') if line.strip()]
-                # ----------------------------------------------------
 
                 # アプリ形式に変換
                 formatted_rows = []
@@ -127,6 +157,7 @@ class OcrEngine:
                 error_msg = str(e)
                 print(f"⚠️ Failed ({page_label}) with {current_model_name}: {error_msg}")
                 
+                # 致命的でないエラーなら次のモデルへ
                 if "404" in error_msg or "not found" in error_msg or "429" in error_msg or "500" in error_msg:
                     continue
                 else:
@@ -136,7 +167,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Robust JSON Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Balanced High-Fidelity Mode...")
         
         if not self.model:
             return [[{'text': "Error: AI Model not initialized."}]]
@@ -153,7 +184,8 @@ class OcrEngine:
 
         if filename.endswith('.pdf'):
             try:
-                pil_images = convert_from_bytes(file_bytes, dpi=150, fmt='jpeg')
+                # PDF変換解像度: 200dpi (小さな文字の精度確保のため)
+                pil_images = convert_from_bytes(file_bytes, dpi=200, fmt='jpeg')
                 for i, img in enumerate(pil_images):
                     images_to_process.append((f"Page {i+1}", img))
             except Exception as e:
@@ -165,6 +197,7 @@ class OcrEngine:
 
         final_results = []
 
+        # 並列処理維持
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             future_to_page = {executor.submit(self._process_single_page, item): item[0] for item in images_to_process}
             
