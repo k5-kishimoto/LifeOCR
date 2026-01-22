@@ -46,10 +46,36 @@ class OcrEngine:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Natural-Order Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Layout-Safe Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
+
+    # =========================================================================
+    # 🧹 テキストクリーニング（改行削除の要）
+    # =========================================================================
+    
+    def _clean_text(self, val):
+        """
+        改行コードや余計な空白を強制的に削除して、1行の文字列にする
+        """
+        if val is None:
+            return ""
+        
+        # 辞書やリストが来たら文字列化
+        if isinstance(val, (dict, list)):
+            val = str(val)
+        
+        val = str(val)
+        
+        # ★ここが重要: 改行コードを空文字またはスペースに置換
+        val = val.replace("\n", "").replace("\r", "")
+        val = val.replace("■", " ") # ノイズ除去
+        
+        # 連続するスペースを1つにまとめる
+        val = re.sub(r'\s+', ' ', val)
+        
+        return val.strip()
 
     # =========================================================================
     # 🖼️ 画像処理
@@ -121,14 +147,15 @@ class OcrEngine:
         return None
 
     def _call_ai_api(self, image_part, part_label):
+        # プロンプトでも念押し
         prompt = """
         あなたは日本語OCRエンジンです。画像からテキストを抽出してください。
         
         【重要命令】
+        - **改行コード(\n)は絶対に出力しないでください。すべて1行につなげてください。**
         - 迷ったら推測して埋めること。空欄禁止。
         - 半角カナは半角のまま出力。
-        - すべての値をダブルクォートで囲む。
-        - **行の順番を変えないでください。上から順に出力してください。**
+        - 行の順番を変えないでください。
 
         【出力フォーマット (JSON)】
         {
@@ -164,7 +191,7 @@ class OcrEngine:
         return None
 
     # =========================================================================
-    # 🔄 スマート結合・整形（順序維持バージョン）
+    # 🔄 スマート結合・整形（順序維持）
     # =========================================================================
 
     def _merge_split_results(self, results):
@@ -176,117 +203,90 @@ class OcrEngine:
             combined_json["document_info"] = results[target_source].get("document_info", {})
             combined_json["table_headers"] = results[target_source].get("table_headers", [])
 
-        # --- 順序維持のマージロジック ---
-        # 1. まず「Top」の結果をそのまま採用（これが文書の上半分なので順序は正しい）
+        # --- 順序維持のマージ ---
         final_rows = []
         
         top_rows = results.get("Top", {}).get("table_rows", [])
         bottom_rows = results.get("Bottom", {}).get("table_rows", [])
         
-        # Topの行を追加（クリーニングしつつ）
+        # 1. Topの行を追加（クリーニング適用）
         for row in top_rows:
             if not row or all(str(c).strip() == "" for c in row): continue
             
-            cleaned_row = []
-            for c in row:
-                val = str(c) if isinstance(c, (dict, list)) else str(c).strip()
-                val = val.replace("■", " ") # ノイズ除去
-                cleaned_row.append(val)
+            cleaned_row = [self._clean_text(c) for c in row]
             final_rows.append(cleaned_row)
 
-        # 2. 「Bottom」の行をチェックして、新しい行なら末尾に追加する
-        # （TopとBottomの重複部分は、Topを正として、Bottom側の情報で補完する）
-        
+        # 2. Bottomの行をチェックして追加
         for b_row in bottom_rows:
             if not b_row or all(str(c).strip() == "" for c in b_row): continue
 
-            b_cleaned = []
-            for c in b_row:
-                val = str(c) if isinstance(c, (dict, list)) else str(c).strip()
-                val = val.replace("■", " ")
-                b_cleaned.append(val)
+            b_cleaned = [self._clean_text(c) for c in b_row]
             
-            # このBottom行が、すでにTop行（final_rows）に含まれているかチェック
+            # 重複チェック（Topにある行か？）
             match_index = -1
-            
             for i, t_row in enumerate(final_rows):
-                # 列数が違うなら別の行
                 if len(t_row) != len(b_cleaned): continue
                 
-                # 内容の一致度をチェック
-                # 「同じ日付」かつ「同じ金額」なら同一行とみなす、などの判定
+                # 内容の一致度チェック
                 match_count = 0
                 non_empty_count = 0
-                
                 for v1, v2 in zip(t_row, b_cleaned):
                     if v1 or v2: non_empty_count += 1
                     if v1 and v2 and v1 == v2: match_count += 1
                 
-                # 8割以上一致していれば「同じ行（重複）」とみなす
                 if non_empty_count > 0 and (match_count / non_empty_count) > 0.8:
                     match_index = i
                     break
             
             if match_index != -1:
-                # 重複が見つかった場合：
-                # Bottomの方が情報量が多い（文字数が多い）場合のみ、既存行をアップデート（補完）する
-                # ※順序は変えない！
+                # 既存行の補完（長い方を採用）
                 existing = final_rows[match_index]
                 merged_row = []
                 for t_val, b_val in zip(existing, b_cleaned):
-                    # シンプルに長い方を採用（情報の欠損を防ぐため）
                     if len(b_val) > len(t_val):
                         merged_row.append(b_val)
                     else:
                         merged_row.append(t_val)
                 final_rows[match_index] = merged_row
             else:
-                # 重複が見つからない場合：
-                # これはBottom部分にしかない新しい行なので、末尾に追加
+                # 新規行として追加
                 final_rows.append(b_cleaned)
-
-        # ★重要: ここで sort をしない！
-        # final_rows.sort(...) <--- これを削除しました
 
         combined_json["table_rows"] = final_rows
         return combined_json, len(final_rows)
 
     def _format_to_ui_data(self, combined_json):
         formatted_rows = []
-        def safe_str(val):
-            if val is None: return ""
-            if isinstance(val, (dict, list)): return str(val)
-            return str(val).strip()
 
-        # 文書情報
+        # 1. 文書情報
         doc_info = combined_json.get("document_info", {})
-        title_text = safe_str(doc_info.get('title')) or ""
+        title_text = self._clean_text(doc_info.get('title'))
         if title_text: formatted_rows.append([{'text': f"■ {title_text}"}])
         
         org_info = []
-        if doc_info.get("org_name"): org_info.append(safe_str(doc_info['org_name']))
-        if doc_info.get("sub_name"): org_info.append(safe_str(doc_info['sub_name']))
-        if doc_info.get("bank_name"): org_info.append(safe_str(doc_info['bank_name']))
-        if doc_info.get("branch_name"): org_info.append(safe_str(doc_info['branch_name']))
+        for key in ['org_name', 'sub_name', 'bank_name', 'branch_name']:
+            val = self._clean_text(doc_info.get(key))
+            if val: org_info.append(val)
+        
         if org_info: formatted_rows.append([{'text': " ".join(org_info)}])
 
         meta_texts = []
-        if doc_info.get("account_name"): meta_texts.append(f"名義: {safe_str(doc_info['account_name'])}")
-        if doc_info.get("period"): meta_texts.append(f"期間: {safe_str(doc_info['period'])}")
-        if doc_info.get("other_info"): meta_texts.append(safe_str(doc_info['other_info']))
+        if doc_info.get("account_name"): meta_texts.append(f"名義: {self._clean_text(doc_info['account_name'])}")
+        if doc_info.get("period"): meta_texts.append(f"期間: {self._clean_text(doc_info['period'])}")
+        if doc_info.get("other_info"): meta_texts.append(self._clean_text(doc_info['other_info']))
         if meta_texts: formatted_rows.append([{'text': " / ".join(meta_texts)}])
         
         formatted_rows.append([{'text': ""}])
 
-        # ヘッダー
+        # 2. ヘッダー（ここでも強制クリーニング）
         headers = combined_json.get("table_headers", [])
         if headers:
-            clean_headers = [safe_str(h) for h in headers]
+            clean_headers = [self._clean_text(h) for h in headers]
             formatted_rows.append([{'text': h} for h in clean_headers])
 
-        # 明細データ
+        # 3. 明細データ
         for row in combined_json.get("table_rows", []):
-            formatted_cells = [{'text': safe_str(cell)} for cell in row]
+            formatted_cells = [{'text': self._clean_text(cell)} for cell in row]
             formatted_rows.append(formatted_cells)
 
         return formatted_rows
@@ -329,7 +329,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Natural-Order Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Layout-Safe Mode...")
         if not self.model: return [[{'text': "Error: AI Model not initialized."}]]
 
         uploaded_file.seek(0)
