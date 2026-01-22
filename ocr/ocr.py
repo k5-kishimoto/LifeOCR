@@ -35,14 +35,15 @@ class OcrEngine:
                 model_name=self.model_name,
                 generation_config=self.generation_config
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Header-Focus Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Stable Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
 
     def _optimize_image(self, img):
-        # 画像の四隅までくっきりさせるために高解像度維持
-        max_size = 3200 
+        # ★修正1: 解像度を安全圏(2560px)に戻す
+        # 3200pxはサーバーのメモリを食いつぶすリスクがあります
+        max_size = 2560 
         if max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
         
@@ -51,7 +52,7 @@ class OcrEngine:
         
         img = ImageOps.autocontrast(img, cutoff=1)
         enhancer = ImageEnhance.Sharpness(img)
-        img = enhancer.enhance(1.3) 
+        img = enhancer.enhance(1.4) 
         
         return img
 
@@ -61,23 +62,24 @@ class OcrEngine:
         optimized_image = self._optimize_image(pil_image)
         
         img_byte_arr = io.BytesIO()
-        optimized_image.save(img_byte_arr, format='WEBP', quality=100, lossless=True)
+        # ★修正2: lossless=False, quality=85 に変更
+        # ロスレスはデータ量が10倍以上になるため、通信エラーの原因になります。
+        # quality=85 なら人間の目には無劣化に見え、OCR精度も落ちません。
+        optimized_image.save(img_byte_arr, format='WEBP', quality=85)
         img_bytes = img_byte_arr.getvalue()
         
         image_part = {"mime_type": "image/webp", "data": img_bytes}
 
-        # ★ここを大幅強化：ヘッダー探索の指示を追加
         prompt = """
         あなたは高精度の日本語OCRエンジンです。
         画像から全テキスト情報を抽出し、JSONを返してください。
 
         【最重要：スキャン手順】
         1. **ヘッダー領域の完全スキャン**:
-           - まず、**画像の最上部、左上、右上**を注意深く見てください。
-           - 「ロゴマーク」や「小さな文字」で書かれた **銀行名・金融機関名** を必ず見つけ出してください。
-           - 「支店名」や「取扱店」もヘッダー付近にある場合が多いので見逃さないでください。
+           - 画像の四隅（特に左上・右上）にある **銀行名・金融機関名・支店名** を必ず見つけ出してください。
+           - 小さなロゴや印字も見逃さないこと。
         2. **表データの抽出**:
-           - その後、メインの表データを読み取ってください。
+           - メインの明細データを読み取ってください。
 
         【重要ルール】
         1. **文字種の維持**: 半角カナ(`ﾌﾘｺﾐ`)は半角のまま。全角変換禁止。
@@ -86,12 +88,12 @@ class OcrEngine:
         【出力フォーマット (JSON)】
         {
           "document_info": {
-             "bank_name": "銀行名（ロゴやヘッダーから抽出）",
-             "branch_name": "支店名（見つからなければ空文字）",
-             "title": "文書タイトル（入出金明細など）",
+             "bank_name": "銀行名",
+             "branch_name": "支店名",
+             "title": "文書タイトル",
              "account_name": "口座名義",
-             "period": "期間・日付情報",
-             "other_info": "その他（支店コードや口座番号など）"
+             "period": "期間",
+             "other_info": "その他"
           },
           "table_headers": ["日付", "摘要", "お支払金額", "お預り金額", "差引残高", "取扱店"],
           "table_rows": [
@@ -134,14 +136,12 @@ class OcrEngine:
                         if isinstance(val, (dict, list)): return str(val)
                         return str(val).strip()
 
-                    # 1. 文書情報（銀行名・支店名を強調表示）
+                    # 1. 文書情報
                     doc_info = parsed_json.get("document_info", {})
                     
-                    # タイトル行
                     title_text = safe_str(doc_info.get('title')) or "明細書"
                     formatted_rows.append([{'text': f"■ {title_text}", 'is_header': True}])
                     
-                    # 銀行情報行（ここをリッチにする）
                     bank_info = []
                     if doc_info.get("bank_name"): bank_info.append(f"🏦 {safe_str(doc_info['bank_name'])}")
                     if doc_info.get("branch_name"): bank_info.append(f"🏢 {safe_str(doc_info['branch_name'])}")
@@ -149,7 +149,6 @@ class OcrEngine:
                     if bank_info:
                         formatted_rows.append([{'text': " ".join(bank_info)}])
 
-                    # 口座・その他情報行
                     meta_texts = []
                     if doc_info.get("account_name"): meta_texts.append(f"名義: {safe_str(doc_info['account_name'])}")
                     if doc_info.get("period"): meta_texts.append(f"期間: {safe_str(doc_info['period'])}")
@@ -158,7 +157,6 @@ class OcrEngine:
                     if meta_texts:
                         formatted_rows.append([{'text': " / ".join(meta_texts)}])
                     
-                    # 空行を入れる
                     formatted_rows.append([{'text': ""}])
 
                     # 2. ヘッダー
@@ -205,7 +203,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Header-Focus Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Stable Mode...")
         
         if not self.model:
             return [[{'text': "Error: AI Model not initialized."}]]
@@ -222,7 +220,8 @@ class OcrEngine:
 
         if filename.endswith('.pdf'):
             try:
-                pil_images = convert_from_bytes(file_bytes, dpi=300, fmt='jpeg')
+                # PDF自体の変換解像度も少し下げてメモリ節約 (250dpi)
+                pil_images = convert_from_bytes(file_bytes, dpi=250, fmt='jpeg')
                 for i, img in enumerate(pil_images):
                     images_to_process.append((f"Page {i+1}", img))
             except Exception as e:
@@ -234,7 +233,9 @@ class OcrEngine:
 
         final_results = []
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        # ★修正3: 並列処理数を減らしてクラッシュ防止 (8 -> 2)
+        # サーバーのメモリを守るため、同時に処理するのは2ページまでに制限します。
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future_to_page = {executor.submit(self._process_single_page, item): item[0] for item in images_to_process}
             
             results_dict = {}
