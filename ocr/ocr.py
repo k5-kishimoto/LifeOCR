@@ -6,7 +6,8 @@ import re
 import concurrent.futures
 from pdf2image import convert_from_bytes
 import google.generativeai as genai
-from google.ai.generativelanguage_v1beta.types import content # セーフティ設定用
+# ★修正: インポートをシンプルに変更
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from PIL import Image, ImageEnhance, ImageOps 
 from dotenv import load_dotenv
 
@@ -34,19 +35,18 @@ class OcrEngine:
                 response_mime_type="application/json"
             )
 
-            # ★修正1: セーフティ設定（誤検知による空レスポンスを防ぐ）
-            # OCRでは銀行名などが稀に誤検知されることがあるため、フィルターを無効化します
+            # ★修正: 安全設定の書き方を変更（これでエラーが消えます）
             self.safety_settings = {
-                content.HarmCategory.HARM_CATEGORY_HARASSMENT: content.SafetySetting.HarmBlockThreshold.BLOCK_NONE,
-                content.HarmCategory.HARM_CATEGORY_HATE_SPEECH: content.SafetySetting.HarmBlockThreshold.BLOCK_NONE,
-                content.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: content.SafetySetting.HarmBlockThreshold.BLOCK_NONE,
-                content.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: content.SafetySetting.HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
             }
             
             self.model = genai.GenerativeModel(
                 model_name=self.model_name,
                 generation_config=self.generation_config,
-                safety_settings=self.safety_settings # 設定を適用
+                safety_settings=self.safety_settings
             )
             print(f"⚙️ Initial Model config: {self.model_name} (Robust Safety Mode)")
 
@@ -153,7 +153,6 @@ class OcrEngine:
         
         for current_model_name in retry_models:
             try:
-                # モデルごとにセーフティ設定を適用して初期化
                 current_model = genai.GenerativeModel(
                     current_model_name,
                     generation_config=self.generation_config,
@@ -162,27 +161,19 @@ class OcrEngine:
                 
                 response = current_model.generate_content([prompt, image_part])
                 
-                # ★修正2: 安全なレスポンス取得
-                # response.text がエラーを吐く場合（空の場合）をキャッチして、次のモデルへ行く
                 try:
-                    # 候補が存在するかチェック
                     if not response.candidates:
                         raise ValueError("No candidates returned (Safety Block or Empty)")
                     
-                    # finish_reason のチェック（ログ用）
                     finish_reason = response.candidates[0].finish_reason
-                    if finish_reason != 1: # 1=STOP (正常終了)
+                    if finish_reason != 1: 
                          print(f"⚠️ Warning ({part_label}): Finish reason is {finish_reason}")
 
-                    # テキスト取得
                     return response.text
                 
                 except ValueError as ve:
-                    # response.textへのアクセス失敗時、partから直接取れるか試す
                     if response.candidates and response.candidates[0].content.parts:
                         return response.candidates[0].content.parts[0].text
-                    
-                    # それでもダメならエラーとして扱う（次のモデルへリトライ）
                     raise ve
 
             except Exception as e:
