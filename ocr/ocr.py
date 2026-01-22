@@ -46,26 +46,56 @@ class OcrEngine:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Pure-Raw Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Smart-Dedupe Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
 
     # =========================================================================
-    # 🧹 テキストクリーニング
+    # 🧹 クリーニング & 指紋生成
     # =========================================================================
     
     def _clean_text(self, val):
         if val is None: return ""
         if isinstance(val, (dict, list)): val = str(val)
         val = str(val)
-        # 改行は削除（表崩れ防止）
         val = val.replace("\n", "").replace("\r", "")
         val = val.replace("■", " ") 
         val = re.sub(r'\s+', ' ', val)
         return val.strip()
 
-    # ★削除: _is_header_row メソッドは危険なので削除しました
+    def _is_header_row(self, row):
+        """ヘッダー行っぽいものを判定して除外するため"""
+        header_keywords = ["日付", "摘要", "金額", "入金", "出金", "残高", "借方", "貸方", "区分", "支店名"]
+        match_count = 0
+        for cell in row:
+            text = str(cell)
+            if any(k in text for k in header_keywords):
+                match_count += 1
+        return match_count >= 2
+
+    def _get_row_fingerprint(self, row):
+        """
+        行のユニークさを判定するための指紋を作成
+        「日付」と「金額（数値）」の組み合わせを使う
+        例: "2025/10/10_10000"
+        """
+        parts = []
+        for cell in row:
+            text = self._clean_text(cell)
+            # 日付 (yyyy/mm/dd または yyyy-mm-dd)
+            if re.search(r'\d{4}[/-年]\d{1,2}[/-月]\d{1,2}', text):
+                parts.append(text)
+            # 金額 (3桁区切り)
+            elif re.search(r'\d{1,3}(,\d{3})+', text) or (text.isdigit() and len(text) > 2):
+                parts.append(text.replace(",", ""))
+        
+        # 名前（カタカナ）も指紋に含める（同日・同額の別人対策）
+        name_match = [c for c in row if re.search(r'[ｱ-ﾝﾞﾟ]{2,}', str(c))]
+        if name_match:
+            parts.append(self._clean_text(name_match[0]))
+
+        return "_".join(sorted(parts))
 
     # =========================================================================
     # 🖼️ 画像処理
@@ -175,7 +205,7 @@ class OcrEngine:
         return None
 
     # =========================================================================
-    # 🔄 単純結合（フィルタリングなし）
+    # 🔄 スマート結合・重複排除（指紋マッチング）
     # =========================================================================
 
     def _merge_split_results(self, results):
@@ -187,31 +217,48 @@ class OcrEngine:
             combined_json["document_info"] = results[target_source].get("document_info", {})
             combined_json["table_headers"] = results[target_source].get("table_headers", [])
 
-        all_raw_rows = []
-        
-        if "Top" in results:
-            all_raw_rows.extend(results["Top"].get("table_rows", []))
-            
-        if "Bottom" in results:
-            all_raw_rows.extend(results["Bottom"].get("table_rows", []))
-
+        # --- 結合ロジック ---
         final_rows = []
-        seen_exact_strings = set()
+        seen_fingerprints = set() # 既に登録された行の「指紋」を記録
 
-        for row in all_raw_rows:
+        # 1. Topの行を処理
+        top_rows = results.get("Top", {}).get("table_rows", [])
+        for row in top_rows:
             if not row or all(str(c).strip() == "" for c in row): continue
             
-            # ★変更: ヘッダー行判定を削除しました。すべての行を通します。
+            # ヘッダー行ならスキップ
+            if self._is_header_row(row): continue
 
-            # クリーニング（改行削除）
             cleaned_row = [self._clean_text(c) for c in row]
             
-            # 文字列化して「完全一致」だけは防ぐ（誤って2回読んだ場合など）
-            row_str = str(cleaned_row)
+            # 指紋を作成して記録
+            fp = self._get_row_fingerprint(cleaned_row)
+            if fp: 
+                seen_fingerprints.add(fp)
             
-            if row_str not in seen_exact_strings:
-                seen_exact_strings.add(row_str)
-                final_rows.append(cleaned_row)
+            final_rows.append(cleaned_row)
+
+        # 2. Bottomの行を処理
+        bottom_rows = results.get("Bottom", {}).get("table_rows", [])
+        for row in bottom_rows:
+            if not row or all(str(c).strip() == "" for c in row): continue
+            
+            # ヘッダー行ならスキップ
+            if self._is_header_row(row): continue
+
+            cleaned_row = [self._clean_text(c) for c in row]
+            
+            # 指紋を作成
+            fp = self._get_row_fingerprint(cleaned_row)
+            
+            # 指紋が既にTopにある場合（＝重複行）
+            if fp and fp in seen_fingerprints:
+                # 既存の行よりも情報量が多い（列が多い、文字数が多い）場合のみ差し替えたいが、
+                # 順序が狂うリスクがあるので、基本的には「Topにあるものを優先」して、Bottom側は捨てる
+                continue 
+            
+            # 指紋がない（日付も金額もない）行、または新しい行なら追加
+            final_rows.append(cleaned_row)
 
         combined_json["table_rows"] = final_rows
         return combined_json, len(final_rows)
@@ -290,7 +337,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Pure-Raw Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Smart-Dedupe Mode...")
         if not self.model: return [[{'text': "Error: AI Model not initialized."}]]
 
         uploaded_file.seek(0)
