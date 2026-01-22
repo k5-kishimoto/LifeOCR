@@ -3,7 +3,7 @@ import json
 import io
 import time
 import re
-import ast  # ★追加: 柔軟なデータ解析用
+import ast
 import concurrent.futures
 from pdf2image import convert_from_bytes
 import google.generativeai as genai
@@ -15,6 +15,7 @@ load_dotenv()
 
 class OcrEngine:
     def __init__(self):
+        """初期化"""
         self.api_key = os.environ.get("GEMINI_API_KEY")
         self.model = None
         
@@ -45,7 +46,7 @@ class OcrEngine:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Kana-Rescue Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Force-Extract Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
@@ -72,23 +73,19 @@ class OcrEngine:
         width, height = img.size
         split_ratio = 0.60
         overlap = 0.40
-        
         crop_top = img.crop((0, 0, width, int(height * split_ratio)))
         crop_bottom = img.crop((0, int(height * overlap), width, height))
-        
         return [("Top", crop_top), ("Bottom", crop_bottom)]
 
     # =========================================================================
-    # 🧠 データ解析・修復（ここを大幅強化）
+    # 🧠 データ解析・修復
     # =========================================================================
 
     def _repair_json(self, text):
-        """
-        どんな形式で返ってきても、リスト構造さえあれば無理やりデータを抽出する
-        """
+        """どんな形式でも無理やり抽出する"""
         if not text: return None
         
-        # 1. まずは素直にJSONパース
+        # 1. 標準JSON
         try:
             cleaned = text.strip()
             if cleaned.startswith("```json"): cleaned = cleaned[7:-3]
@@ -97,7 +94,7 @@ class OcrEngine:
         except:
             pass
 
-        # 2. 軽微なJSON破損の修復
+        # 2. 軽微な修復
         try:
             if cleaned.count('"') % 2 != 0: cleaned += '"'
             if not cleaned.endswith("}"): cleaned += "}]}"
@@ -105,28 +102,43 @@ class OcrEngine:
         except:
             pass
             
-        # 3. ★最強の正規表現 & ast解析
-        # 行データ ["...", "..."] または [..., ...] を探し出す
+        # 3. 強制抽出（Brute Force）
+        # "[" で始まり "]" で終わる箇所をすべて拾う
         try:
-            # 角括弧で囲まれた部分をすべて抽出（改行を含んでもOK）
-            # 以前の厳密な正規表現をやめ、緩い抽出に変更
-            candidate_rows = re.findall(r'\[\s*.*?\s*\]', text, re.DOTALL)
+            # 改行またぎも許容する緩い正規表現
+            candidate_rows = re.findall(r'\[(.*?)\]', text, re.DOTALL)
             
             valid_rows = []
-            for row_str in candidate_rows:
+            for row_content in candidate_rows:
+                # 中身が空ならスキップ
+                if not row_content.strip(): continue
+
+                # まずはそのままパーストライ
                 try:
-                    # JSONとしてパース試行
-                    row_data = json.loads(row_str)
-                    if isinstance(row_data, list): valid_rows.append(row_data)
-                    continue
+                    # [ ... ] の形に戻してパース
+                    row_data = json.loads(f"[{row_content}]")
+                    if isinstance(row_data, list): 
+                        valid_rows.append(row_data)
+                        continue
                 except:
                     pass
                 
+                # Pythonリテラルとしてトライ
                 try:
-                    # Pythonのリテラル（シングルクォートなど）としてパース試行
-                    # これにより ['A', 'B'] のような形式も救える
-                    row_data = ast.literal_literal_eval(row_str)
-                    if isinstance(row_data, list): valid_rows.append(row_data)
+                    row_data = ast.literal_eval(f"[{row_content}]")
+                    if isinstance(row_data, list): 
+                        valid_rows.append(row_data)
+                        continue
+                except:
+                    pass
+
+                # 最終手段: カンマ区切りで無理やり分割
+                # "2023-01-01", "text" のような文字列を想定
+                try:
+                    # ダブルクォートで囲まれた部分だけを抽出
+                    items = re.findall(r'"([^"]*)"', row_content)
+                    if items:
+                        valid_rows.append(items)
                 except:
                     pass
 
@@ -140,33 +152,29 @@ class OcrEngine:
     def _call_ai_api(self, image_part, part_label):
         """Gemini API呼び出し"""
         
+        # ★修正: 「精度が低くても捨てるな」という指示を徹底
         prompt = """
         あなたは高精度の日本語OCRエンジンです。
         画像は書類の一部（上半分または下半分）です。
         
-        【最重要タスク: 半角カナ行の抽出】
-        - **半角カナ（例: `ﾌﾘｺﾐ` `ｶ)`）を含む行を絶対に見逃さないでください。**
-        - 文字が潰れてノイズに見えても、明細行であれば必ず抽出してください。
-        - 数値（金額など）はダブルクォートで囲み、文字列として出力してください（例: "10000"）。
+        【最重要命令: 網羅性】
+        - **すべての行を抽出してください。**
+        - 文字が薄い、潰れている、半角カナで読みづらい場合でも、**絶対に行を削除しないでください。**
+        - 読めない文字がある場合は `?` や `■` に置き換えてでも、その行のデータを出力してください。
+        - 「自信がないから出力しない」は禁止です。
 
         【抽出ルール】
         1. **項目名**: ヘッダー内の改行は無視してつなげる（例:「お預り\n金額」→「お預り金額」）。
-        2. **文字種**: 半角カナは半角のまま。全角変換禁止。
-        3. **空白**: 氏名の間のスペースは保持。
+        2. **文字種**: 半角カナ(`ﾌﾘｺﾐ`)は半角のまま出力。全角変換禁止。
+        3. **データ型**: すべての値をダブルクォートで囲んで文字列として出力してください。
         
         【出力フォーマット (JSON)】
         {
-          "document_info": { 
-             "title": "タイトル", 
-             "org_name": "発行元", 
-             "sub_name": "支店", 
-             "account_name": "名義", 
-             "period": "期間", 
-             "other_info": "その他" 
-          },
+          "document_info": { "title": "タイトル", "org_name": "発行元", "sub_name": "支店", "account_name": "名義", "period": "期間", "other_info": "その他" },
           "table_headers": ["項目1", "項目2", ...],
           "table_rows": [ 
-             ["2026-01-22", "ﾌﾘｺﾐ ﾃｽﾄ", "10,000", "", "50,000", "本店"] 
+             ["2026-01-22", "ﾌﾘｺﾐ ﾃｽﾄ", "10,000", "", "50,000", "本店"],
+             ["2026-01-23", "不明な文字■■", "5,000", "", "45,000", ""]
           ]
         }
         """
@@ -225,6 +233,10 @@ class OcrEngine:
         seen = set()
         unique_rows = []
         for row in raw_rows:
+            # 行が空ならスキップ
+            if not row or all(str(c).strip() == "" for c in row):
+                continue
+
             row_vals = []
             for c in row:
                 if isinstance(c, (dict, list)): row_vals.append(str(c))
@@ -247,7 +259,6 @@ class OcrEngine:
 
         # 文書情報
         doc_info = combined_json.get("document_info", {})
-        
         title_text = safe_str(doc_info.get('title')) or ""
         if title_text: formatted_rows.append([{'text': f"■ {title_text}"}])
         
@@ -303,7 +314,8 @@ class OcrEngine:
             future_to_part = {}
             for p_name, p_img in parts:
                 img_byte_arr = io.BytesIO()
-                p_img.save(img_byte_arr, format='WEBP', quality=85)
+                # ★修正: 最高画質(100)にして、かすれた文字を少しでも見やすくする
+                p_img.save(img_byte_arr, format='WEBP', quality=100)
                 image_part = {"mime_type": "image/webp", "data": img_byte_arr.getvalue()}
                 
                 future = executor.submit(self._call_ai_api, image_part, f"{page_label}-{p_name}")
@@ -328,7 +340,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Kana-Rescue Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Force-Extract Mode...")
         
         if not self.model:
             return [[{'text': "Error: AI Model not initialized."}]]
