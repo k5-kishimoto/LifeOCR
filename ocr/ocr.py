@@ -6,7 +6,6 @@ import re
 import concurrent.futures
 from pdf2image import convert_from_bytes
 import google.generativeai as genai
-# ★ ImageOps を追加（自動補正用）
 from PIL import Image, ImageEnhance, ImageOps 
 from dotenv import load_dotenv
 
@@ -37,32 +36,24 @@ class OcrEngine:
                 model_name=self.model_name,
                 generation_config=self.generation_config
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Auto-Enhance Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Japanese OCR Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
 
     def _optimize_image(self, img):
         """
-        ★ スマート画像補正
-        画像ごとに最適な濃さを自動計算し、副作用なく視認性を上げます。
+        スマート画像補正（薄い文字対策）
         """
-        # 1. サイズ調整
         max_size = 2560 
         if max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
         
-        # RGBモードを確認（オートコントラストに必要）
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
-        # 2. ★自動コントラスト調整 (Auto Contrast)
-        # 画像の最も暗い部分を「完全な黒」、明るい部分を「完全な白」に引き伸ばします。
-        # これにより、薄いグレーの文字は「黒」に近づき、元々黒い文字はそのまま維持されます。
-        # cutoff=1 は、ノイズ（極端な点）を1%無視して計算する設定です。
+        # オートコントラストで薄い文字をくっきりさせる
         img = ImageOps.autocontrast(img, cutoff=1)
-        
-        # 3. 控えめなシャープネス (1.5倍は強すぎるので1.1倍に)
         enhancer = ImageEnhance.Sharpness(img)
         img = enhancer.enhance(1.1) 
         
@@ -71,7 +62,6 @@ class OcrEngine:
     def _process_single_page(self, args):
         page_label, pil_image = args
         
-        # スマート補正の適用
         optimized_image = self._optimize_image(pil_image)
         
         img_byte_arr = io.BytesIO()
@@ -80,35 +70,43 @@ class OcrEngine:
         
         image_part = {"mime_type": "image/webp", "data": img_bytes}
 
+        # ★ここを大幅修正：日本語プロンプト ＆ メタデータ抽出指示
         prompt = """
-        You are an expert OCR engine for Japanese bank statements (通帳/明細).
-        
-        [Task]
-        Extract ALL transaction rows into a JSON object.
-        Focus specifically on capturing "Description (摘要)", "Branch Name (取扱店)", and "Bank Name".
-        
-        [Output Schema]
-        Return a JSON object with a key "table_data" containing a 2D array.
-        Example:
+        あなたは高精度の日本語OCRエンジンです。
+        提供された画像（通帳、銀行明細、請求書など）から、可能な限りすべてのテキスト情報を抽出し、構造化データとして返してください。
+
+        【タスク】
+        1. **文書情報（表の外）**: 
+           - 「文書のタイトル（例：入出金明細）」「銀行名」「支店名」「口座名義」「期間」「作成日」など、表の外にある重要情報を抽出してください。
+        2. **明細データ（表の中）**: 
+           - 表の中身をすべて抽出してください。
+
+        【重要ルール】
+        - **翻訳禁止**: 画像に書かれている日本語をそのまま出力してください。英語（"Date", "Description"）に変換しないでください。「摘要」は「摘要」のまま出力します。
+        - **全角・半角**: 数字は半角に統一しますが、カタカナや漢字は原文のままにしてください。
+        - **空欄**: 何も書かれていないセルは空文字 "" にしてください。null は禁止です。
+
+        【出力フォーマット (JSON)】
+        以下の構造でJSONのみを返してください。
         {
-          "table_data": [
-            ["Year-Month-Day", "Description(摘要)", "Amount(支払)", "Amount(入金)", "Balance(差引残高)", "Branch(取扱店)"],
-            ["2026-01-22", "振込 ヤマダタロウ", "10000", "", "50000", "本店"]
+          "document_info": {
+             "title": "文書のタイトル（見つからなければ空文字）",
+             "bank_name": "銀行名（あれば）",
+             "account_name": "口座名義（あれば）",
+             "other_info": "その他（支店名や期間など、見つかったテキスト）"
+          },
+          "table_headers": ["日付", "摘要", "お支払金額", "お預り金額", "差引残高", "取扱店"],
+          "table_rows": [
+             ["2026-01-22", "振込 ヤマダタロウ", "10,000", "", "50,000", "本店"],
+             ["2026-01-23", "電気代", "5,000", "", "45,000", ""]
           ]
         }
-
-        [Strict Rules]
-        1. **Missing Text**: The Japanese text might be faint. Look closely for Kanji/Kana in the "Description" and "Branch" columns.
-        2. **Empty Cells**: Use empty string "" for blank cells. Never use null.
-        3. **Formatting**: 
-           - Remove spaces between Japanese chars ("海 銀" -> "海銀").
-           - Keep numbers as strings (e.g. "10,000").
         """
 
         retry_models = [
-            self.model_name,            # 1. gemini-2.5-flash
-            'gemini-2.5-pro',           # 2. gemini-2.5-pro
-            'gemini-2.0-flash'          # 3. gemini-2.0-flash
+            self.model_name,
+            'gemini-2.5-pro',
+            'gemini-2.0-flash'
         ]
         
         retry_models = list(dict.fromkeys(retry_models))
@@ -123,9 +121,11 @@ class OcrEngine:
                 response = current_model.generate_content([prompt, image_part])
                 raw_text = response.text
                 
-                data_list = []
-                
+                # 結果格納用
+                formatted_rows = []
+
                 try:
+                    # JSONクリーニング
                     cleaned_text = raw_text.strip()
                     if cleaned_text.startswith("```json"):
                         cleaned_text = cleaned_text[7:-3]
@@ -134,40 +134,53 @@ class OcrEngine:
 
                     parsed_json = json.loads(cleaned_text)
                     
-                    if isinstance(parsed_json, dict) and "table_data" in parsed_json:
-                        data_list = parsed_json["table_data"]
-                    elif isinstance(parsed_json, list):
-                        data_list = parsed_json
-                    else:
-                        raise ValueError("Unexpected JSON structure")
+                    # --- アプリ表示用にデータを整形 ---
+                    
+                    # 1. 文書情報（タイトル等）を最初の数行として追加
+                    doc_info = parsed_json.get("document_info", {})
+                    
+                    # タイトルがあれば大きく表示（ヘッダー扱い）
+                    if doc_info.get("title"):
+                        formatted_rows.append([{'text': f"■ {doc_info['title']}", 'is_header': True}])
+                    
+                    # その他のメタデータを行として追加
+                    meta_texts = []
+                    if doc_info.get("bank_name"): meta_texts.append(doc_info["bank_name"])
+                    if doc_info.get("account_name"): meta_texts.append(f"名義: {doc_info['account_name']}")
+                    if doc_info.get("other_info"): meta_texts.append(doc_info["other_info"])
+                    
+                    if meta_texts:
+                        formatted_rows.append([{'text': " / ".join(meta_texts)}])
+                        formatted_rows.append([{'text': ""}]) # 空行で見やすく
+
+                    # 2. 表ヘッダー
+                    headers = parsed_json.get("table_headers", [])
+                    if headers:
+                        # ヘッダーを強調表示
+                        formatted_rows.append([{'text': h, 'is_header': True} for h in headers])
+
+                    # 3. 表データ
+                    rows = parsed_json.get("table_rows", [])
+                    for row in rows:
+                        def clean_text(val):
+                            if val is None: return ""
+                            s = str(val).strip()
+                            if s.lower() in ["null", "none"]: return ""
+                            return s
+
+                        if isinstance(row, list):
+                            formatted_cells = [{'text': clean_text(cell)} for cell in row]
+                        else:
+                            formatted_cells = [{'text': clean_text(row)}]
+                        formatted_rows.append(formatted_cells)
 
                 except (json.JSONDecodeError, ValueError) as json_err:
-                    print(f"⚠️ JSON Broken on {page_label}. Recovery...")
-                    rows = re.findall(r'\[(.*?)\]', raw_text)
-                    if rows:
-                        for r in rows:
-                            try:
-                                if '"' in r or "'" in r:
-                                    row_data = json.loads(f"[{r}]")
-                                    data_list.append(row_data)
-                            except:
-                                pass
-                    if not data_list:
-                        data_list = [[line] for line in raw_text.split('\n') if line.strip()]
-                
-                formatted_rows = []
-                for row in data_list:
-                    def clean_text(val):
-                        if val is None: return ""
-                        s = str(val).strip()
-                        if s.lower() in ["null", "none"]: return ""
-                        return s
-
-                    if isinstance(row, list):
-                        formatted_cells = [{'text': clean_text(cell)} for cell in row]
-                    else:
-                        formatted_cells = [{'text': clean_text(row)}]
-                    formatted_rows.append(formatted_cells)
+                    print(f"⚠️ JSON Parse Error on {page_label}: {json_err}. Fallback to raw text.")
+                    # JSON解析失敗時は、とりあえず生のテキストを行ごとに表示
+                    lines = raw_text.split('\n')
+                    for line in lines:
+                        if line.strip():
+                            formatted_rows.append([{'text': line.strip()}])
                 
                 print(f"✅ Success ({page_label}) with {current_model_name}")
                 return (page_label, formatted_rows)
@@ -184,7 +197,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Auto-Enhance Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Japanese Native Mode...")
         
         if not self.model:
             return [[{'text': "Error: AI Model not initialized."}]]
@@ -201,7 +214,7 @@ class OcrEngine:
 
         if filename.endswith('.pdf'):
             try:
-                # DPIは300のままでOK（高精細化は副作用が少ないため）
+                # 日本語の細かい文字のためにDPI 300を維持
                 pil_images = convert_from_bytes(file_bytes, dpi=300, fmt='jpeg')
                 for i, img in enumerate(pil_images):
                     images_to_process.append((f"Page {i+1}", img))
@@ -224,6 +237,7 @@ class OcrEngine:
 
         for label, _ in images_to_process:
             if len(images_to_process) > 1:
+                # ページ区切り線
                 final_results.append([{'text': f'--- {label} ---', 'is_header': True}])
             
             if label in results_dict:
