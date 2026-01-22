@@ -27,9 +27,10 @@ class OcrEngine:
             genai.configure(api_key=self.api_key)
             self.model_name = os.environ.get("GEMINI_VERSION", "gemini-2.5-flash")
             
+            # ★修正点: 温度(Temperature)を上げて「推測」を許容する
             self.generation_config = genai.types.GenerationConfig(
-                temperature=0.0, 
-                top_p=1.0,
+                temperature=0.3,   # 0.0(厳格) -> 0.3(推測許可)
+                top_p=0.95,        # 突飛な幻覚は防ぐ
                 max_output_tokens=8192,
                 response_mime_type="application/json"
             )
@@ -46,7 +47,7 @@ class OcrEngine:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Force-Extract Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Creative-Read Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
@@ -63,9 +64,10 @@ class OcrEngine:
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
-        img = ImageOps.autocontrast(img, cutoff=1)
+        # コントラストをさらに強める
+        img = ImageOps.autocontrast(img, cutoff=2) # cutoffを少し上げてノイズを飛ばす
         enhancer = ImageEnhance.Sharpness(img)
-        img = enhancer.enhance(1.4) 
+        img = enhancer.enhance(1.5) # シャープネスも強め
         
         return img
 
@@ -82,10 +84,8 @@ class OcrEngine:
     # =========================================================================
 
     def _repair_json(self, text):
-        """どんな形式でも無理やり抽出する"""
         if not text: return None
         
-        # 1. 標準JSON
         try:
             cleaned = text.strip()
             if cleaned.startswith("```json"): cleaned = cleaned[7:-3]
@@ -94,7 +94,6 @@ class OcrEngine:
         except:
             pass
 
-        # 2. 軽微な修復
         try:
             if cleaned.count('"') % 2 != 0: cleaned += '"'
             if not cleaned.endswith("}"): cleaned += "}]}"
@@ -102,45 +101,30 @@ class OcrEngine:
         except:
             pass
             
-        # 3. 強制抽出（Brute Force）
-        # "[" で始まり "]" で終わる箇所をすべて拾う
         try:
-            # 改行またぎも許容する緩い正規表現
+            # どんな形式でも拾うロジック
             candidate_rows = re.findall(r'\[(.*?)\]', text, re.DOTALL)
-            
             valid_rows = []
             for row_content in candidate_rows:
-                # 中身が空ならスキップ
                 if not row_content.strip(): continue
-
-                # まずはそのままパーストライ
                 try:
-                    # [ ... ] の形に戻してパース
                     row_data = json.loads(f"[{row_content}]")
                     if isinstance(row_data, list): 
                         valid_rows.append(row_data)
                         continue
-                except:
-                    pass
+                except: pass
                 
-                # Pythonリテラルとしてトライ
                 try:
                     row_data = ast.literal_eval(f"[{row_content}]")
                     if isinstance(row_data, list): 
                         valid_rows.append(row_data)
                         continue
-                except:
-                    pass
+                except: pass
 
-                # 最終手段: カンマ区切りで無理やり分割
-                # "2023-01-01", "text" のような文字列を想定
                 try:
-                    # ダブルクォートで囲まれた部分だけを抽出
                     items = re.findall(r'"([^"]*)"', row_content)
-                    if items:
-                        valid_rows.append(items)
-                except:
-                    pass
+                    if items: valid_rows.append(items)
+                except: pass
 
             if valid_rows:
                 return {"table_rows": valid_rows}
@@ -150,23 +134,21 @@ class OcrEngine:
         return None
 
     def _call_ai_api(self, image_part, part_label):
-        """Gemini API呼び出し"""
         
-        # ★修正: 「精度が低くても捨てるな」という指示を徹底
+        # ★修正: プロンプトでも「推測」を許可する
         prompt = """
-        あなたは高精度の日本語OCRエンジンです。
-        画像は書類の一部（上半分または下半分）です。
+        あなたは日本語OCRエンジンです。
+        画像からテキストを抽出してください。
         
-        【最重要命令: 網羅性】
-        - **すべての行を抽出してください。**
-        - 文字が薄い、潰れている、半角カナで読みづらい場合でも、**絶対に行を削除しないでください。**
-        - 読めない文字がある場合は `?` や `■` に置き換えてでも、その行のデータを出力してください。
-        - 「自信がないから出力しない」は禁止です。
+        【重要命令: 積極的な読み取り】
+        - **迷ったら推測して書いてください。**
+        - 文字が薄くても、ノイズがあっても、そこに行があるなら空欄にせず、一番近い文字を推測して埋めてください。
+        - 「読めないから無視する」は禁止です。
 
         【抽出ルール】
-        1. **項目名**: ヘッダー内の改行は無視してつなげる（例:「お預り\n金額」→「お預り金額」）。
-        2. **文字種**: 半角カナ(`ﾌﾘｺﾐ`)は半角のまま出力。全角変換禁止。
-        3. **データ型**: すべての値をダブルクォートで囲んで文字列として出力してください。
+        1. **項目名**: ヘッダー内の改行はつなげる（例:「お預り\n金額」→「お預り金額」）。
+        2. **文字種**: 半角カナ(`ﾌﾘｺﾐ`)は半角のまま。
+        3. **データ型**: すべての値をダブルクォートで囲む。
         
         【出力フォーマット (JSON)】
         {
@@ -174,7 +156,6 @@ class OcrEngine:
           "table_headers": ["項目1", "項目2", ...],
           "table_rows": [ 
              ["2026-01-22", "ﾌﾘｺﾐ ﾃｽﾄ", "10,000", "", "50,000", "本店"],
-             ["2026-01-23", "不明な文字■■", "5,000", "", "45,000", ""]
           ]
         }
         """
@@ -187,6 +168,7 @@ class OcrEngine:
         
         for current_model_name in retry_models:
             try:
+                # モデルごとに設定を適用
                 current_model = genai.GenerativeModel(
                     current_model_name,
                     generation_config=self.generation_config,
@@ -233,10 +215,8 @@ class OcrEngine:
         seen = set()
         unique_rows = []
         for row in raw_rows:
-            # 行が空ならスキップ
-            if not row or all(str(c).strip() == "" for c in row):
-                continue
-
+            if not row or all(str(c).strip() == "" for c in row): continue
+            
             row_vals = []
             for c in row:
                 if isinstance(c, (dict, list)): row_vals.append(str(c))
@@ -314,7 +294,7 @@ class OcrEngine:
             future_to_part = {}
             for p_name, p_img in parts:
                 img_byte_arr = io.BytesIO()
-                # ★修正: 最高画質(100)にして、かすれた文字を少しでも見やすくする
+                # 最高画質を維持
                 p_img.save(img_byte_arr, format='WEBP', quality=100)
                 image_part = {"mime_type": "image/webp", "data": img_byte_arr.getvalue()}
                 
@@ -340,7 +320,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Force-Extract Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Creative-Read Mode...")
         
         if not self.model:
             return [[{'text': "Error: AI Model not initialized."}]]
