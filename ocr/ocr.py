@@ -6,7 +6,6 @@ import re
 import concurrent.futures
 from pdf2image import convert_from_bytes
 import google.generativeai as genai
-# ★修正: インポートをシンプルに変更
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from PIL import Image, ImageEnhance, ImageOps 
 from dotenv import load_dotenv
@@ -27,7 +26,6 @@ class OcrEngine:
             genai.configure(api_key=self.api_key)
             self.model_name = os.environ.get("GEMINI_VERSION", "gemini-2.5-flash")
             
-            # JSONモード設定
             self.generation_config = genai.types.GenerationConfig(
                 temperature=0.0, 
                 top_p=1.0,
@@ -35,7 +33,6 @@ class OcrEngine:
                 response_mime_type="application/json"
             )
 
-            # ★修正: 安全設定の書き方を変更（これでエラーが消えます）
             self.safety_settings = {
                 HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
                 HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -48,7 +45,7 @@ class OcrEngine:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Robust Safety Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Dynamic Header Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
@@ -123,25 +120,33 @@ class OcrEngine:
         return None
 
     def _call_ai_api(self, image_part, part_label):
-        """Gemini API呼び出し（安全対策済み）"""
+        """Gemini API呼び出し（項目名自由化・プロンプト修正）"""
+        # ★修正: 具体的な項目名（日付、摘要など）を削除し、
+        # 「画像にあるものをそのまま抜き出せ」という指示に変更しました。
         prompt = """
         あなたは高精度の日本語OCRエンジンです。
         画像は書類の一部（上半分または下半分）です。
         見えている範囲のすべての情報を抽出し、JSONを返してください。
 
-        【重要：幻覚・ループ防止】
-        - **文字がない場合**: 画像に文字が含まれていない、またはノイズしかない場合は、無理に生成せず `{"table_rows": []}` を返してください。
-        - **空白部分**: 余白を無理に文字として読み取らないでください。
-
-        【重要ルール】
-        1. 文字種の維持: 半角カナ(`ﾌﾘｺﾐ`)は半角のまま。全角変換禁止。
-        2. 空白の維持: 氏名の間のスペースは削除しない。
+        【重要：抽出ルール】
+        1. **項目名の抽出**: 表のヘッダー（項目名）は、固定の形式を使わず、**画像に書かれている通りの言葉**をそのまま抽出してください。
+        2. **文字種の維持**: 半角カナ(`ﾌﾘｺﾐ`)は半角のまま。全角変換禁止。
+        3. **空白の維持**: 氏名の間のスペースは削除しない。
         
         【出力フォーマット (JSON)】
         {
-          "document_info": { "bank_name": "銀行名", "branch_name": "支店名", "title": "文書タイトル", "account_name": "口座名義", "period": "期間", "other_info": "その他" },
-          "table_headers": ["日付", "摘要", "お支払金額", "お預り金額", "差引残高", "取扱店"],
-          "table_rows": [ ["2026-01-22", "ﾌﾘｺﾐ ﾔﾏﾀﾞ ﾀﾛｳ", "10,000", "", "50,000", "本店"] ]
+          "document_info": { 
+             "title": "文書タイトル（明細書、請求書など）", 
+             "org_name": "発行元・銀行名など", 
+             "sub_name": "支店名・部署名など", 
+             "account_name": "宛名・名義", 
+             "period": "期間・日付", 
+             "other_info": "その他" 
+          },
+          "table_headers": ["(画像内のヘッダー項目1)", "(画像内のヘッダー項目2)", "..."],
+          "table_rows": [ 
+             ["データ1", "データ2", "..."] 
+          ]
         }
         """
 
@@ -163,14 +168,11 @@ class OcrEngine:
                 
                 try:
                     if not response.candidates:
-                        raise ValueError("No candidates returned (Safety Block or Empty)")
-                    
+                        raise ValueError("No candidates")
                     finish_reason = response.candidates[0].finish_reason
                     if finish_reason != 1: 
                          print(f"⚠️ Warning ({part_label}): Finish reason is {finish_reason}")
-
                     return response.text
-                
                 except ValueError as ve:
                     if response.candidates and response.candidates[0].content.parts:
                         return response.candidates[0].content.parts[0].text
@@ -222,15 +224,26 @@ class OcrEngine:
             if isinstance(val, (dict, list)): return str(val)
             return str(val).strip()
 
+        # 1. 文書情報
         doc_info = combined_json.get("document_info", {})
-        title_text = safe_str(doc_info.get('title')) or "明細書"
-        formatted_rows.append([{'text': f"■ {title_text}", 'is_header': True}])
         
-        bank_info = []
-        if doc_info.get("bank_name"): bank_info.append(f"🏦 {safe_str(doc_info['bank_name'])}")
-        if doc_info.get("branch_name"): bank_info.append(f"🏢 {safe_str(doc_info['branch_name'])}")
-        if bank_info: formatted_rows.append([{'text': " ".join(bank_info)}])
+        # タイトルも強調表示（太字）を解除するか、シンプルに表示
+        # ※ここではヘッダー属性(is_header)を外し、ただのテキストとして表示します
+        title_text = safe_str(doc_info.get('title')) or ""
+        if title_text:
+            formatted_rows.append([{'text': f"■ {title_text}"}]) # is_header: True を削除
+        
+        # 組織・発行元情報
+        org_info = []
+        if doc_info.get("org_name"): org_info.append(safe_str(doc_info['org_name'])) # アイコン削除でシンプルに
+        if doc_info.get("sub_name"): org_info.append(safe_str(doc_info['sub_name']))
+        # 旧 bank_name 対応（念のため）
+        if doc_info.get("bank_name"): org_info.append(safe_str(doc_info['bank_name']))
+        if doc_info.get("branch_name"): org_info.append(safe_str(doc_info['branch_name']))
+        
+        if org_info: formatted_rows.append([{'text': " ".join(org_info)}])
 
+        # 宛名・期間など
         meta_texts = []
         if doc_info.get("account_name"): meta_texts.append(f"名義: {safe_str(doc_info['account_name'])}")
         if doc_info.get("period"): meta_texts.append(f"期間: {safe_str(doc_info['period'])}")
@@ -239,11 +252,15 @@ class OcrEngine:
         
         formatted_rows.append([{'text': ""}])
 
+        # 2. 表ヘッダー（項目名）
+        # ★修正: 強調表示（is_header: True）を削除し、普通の行として追加
         headers = combined_json.get("table_headers", [])
         if headers:
             clean_headers = [safe_str(h) for h in headers]
-            formatted_rows.append([{'text': h, 'is_header': True} for h in clean_headers])
+            # ここを変更: is_header: True を削除
+            formatted_rows.append([{'text': h} for h in clean_headers])
 
+        # 3. 明細データ
         for row in combined_json.get("table_rows", []):
             def clean_cell(val):
                 if val is None: return ""
@@ -299,7 +316,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Robust Safety Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Dynamic Header Mode...")
         
         if not self.model:
             return [[{'text': "Error: AI Model not initialized."}]]
@@ -338,7 +355,8 @@ class OcrEngine:
 
         for label, _ in images_to_process:
             if len(images_to_process) > 1:
-                final_results.append([{'text': f'--- {label} ---', 'is_header': True}])
+                # ページ区切りも太字解除
+                final_results.append([{'text': f'--- {label} ---'}])
             
             if label in results_dict:
                 final_results.extend(results_dict[label])
