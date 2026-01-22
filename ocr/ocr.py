@@ -46,36 +46,53 @@ class OcrEngine:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Layout-Safe Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Signature-Merge Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
 
     # =========================================================================
-    # 🧹 テキストクリーニング（改行削除の要）
+    # 🧹 テキストクリーニング
     # =========================================================================
     
     def _clean_text(self, val):
-        """
-        改行コードや余計な空白を強制的に削除して、1行の文字列にする
-        """
-        if val is None:
-            return ""
-        
-        # 辞書やリストが来たら文字列化
-        if isinstance(val, (dict, list)):
-            val = str(val)
-        
+        """改行やノイズを削除"""
+        if val is None: return ""
+        if isinstance(val, (dict, list)): val = str(val)
         val = str(val)
-        
-        # ★ここが重要: 改行コードを空文字またはスペースに置換
         val = val.replace("\n", "").replace("\r", "")
-        val = val.replace("■", " ") # ノイズ除去
-        
-        # 連続するスペースを1つにまとめる
+        val = val.replace("■", " ") 
         val = re.sub(r'\s+', ' ', val)
-        
         return val.strip()
+
+    def _get_row_signature(self, row):
+        """
+        行の「指紋（Signature）」を作成する。
+        日付と金額（数値）だけを抜き出してキーにする。
+        これが一致すれば、列数が違っても「同じ行」とみなすことができる。
+        """
+        sig_parts = []
+        for cell in row:
+            text = self._clean_text(cell)
+            # 日付っぽいもの (2026年... や 1/1)
+            if re.search(r'\d{4}[年/-]\d{1,2}[月/-]\d{1,2}', text) or re.search(r'\d{1,2}[/-]\d{1,2}', text):
+                sig_parts.append(text)
+            # 金額っぽいもの (3桁区切りの数字など)
+            elif re.search(r'\d{1,3}(,\d{3})+', text) or (re.match(r'^\d+$', text) and len(text) > 2):
+                sig_parts.append(text.replace(",", "")) # カンマを除去して正規化
+        
+        return "_".join(sorted(sig_parts))
+
+    def _is_header_row(self, row):
+        """ヘッダー行かどうかを判定"""
+        header_keywords = ["日付", "摘要", "金額", "入金", "出金", "残高", "借方", "貸方", "区分", "支店名"]
+        match_count = 0
+        for cell in row:
+            text = str(cell)
+            if any(k in text for k in header_keywords):
+                match_count += 1
+        # 半分以上の列がキーワードを含んでいればヘッダーとみなす
+        return match_count >= 2
 
     # =========================================================================
     # 🖼️ 画像処理
@@ -112,13 +129,11 @@ class OcrEngine:
             elif cleaned.startswith("```"): cleaned = cleaned[3:-3]
             return json.loads(cleaned)
         except: pass
-
         try:
             if cleaned.count('"') % 2 != 0: cleaned += '"'
             if not cleaned.endswith("}"): cleaned += "}]}"
             return json.loads(cleaned)
         except: pass
-            
         try:
             candidate_rows = re.findall(r'\[(.*?)\]', text, re.DOTALL)
             valid_rows = []
@@ -126,36 +141,31 @@ class OcrEngine:
                 if not row_content.strip(): continue
                 try:
                     row_data = json.loads(f"[{row_content}]")
-                    if isinstance(row_data, list): 
-                        valid_rows.append(row_data)
-                        continue
+                    if isinstance(row_data, list): valid_rows.append(row_data)
+                    continue
                 except: pass
                 try:
                     row_data = ast.literal_eval(f"[{row_content}]")
-                    if isinstance(row_data, list): 
-                        valid_rows.append(row_data)
-                        continue
+                    if isinstance(row_data, list): valid_rows.append(row_data)
+                    continue
                 except: pass
                 try:
                     items = re.findall(r'"([^"]*)"', row_content)
                     if items: valid_rows.append(items)
                 except: pass
-
-            if valid_rows:
-                return {"table_rows": valid_rows}
+            if valid_rows: return {"table_rows": valid_rows}
         except: pass
         return None
 
     def _call_ai_api(self, image_part, part_label):
-        # プロンプトでも念押し
         prompt = """
         あなたは日本語OCRエンジンです。画像からテキストを抽出してください。
         
         【重要命令】
-        - **改行コード(\n)は絶対に出力しないでください。すべて1行につなげてください。**
-        - 迷ったら推測して埋めること。空欄禁止。
-        - 半角カナは半角のまま出力。
-        - 行の順番を変えないでください。
+        - **改行コードは禁止。すべて1行につなげる。**
+        - 空欄禁止。推測して埋める。
+        - 半角カナはそのまま。
+        - **ヘッダー行（項目名）が途中に入り込んでも、それは無視してデータ行だけを抽出してください。**
 
         【出力フォーマット (JSON)】
         {
@@ -191,7 +201,7 @@ class OcrEngine:
         return None
 
     # =========================================================================
-    # 🔄 スマート結合・整形（順序維持）
+    # 🔄 スマート結合・整形（Signature Match）
     # =========================================================================
 
     def _merge_split_results(self, results):
@@ -203,53 +213,66 @@ class OcrEngine:
             combined_json["document_info"] = results[target_source].get("document_info", {})
             combined_json["table_headers"] = results[target_source].get("table_headers", [])
 
-        # --- 順序維持のマージ ---
+        # --- 結合ロジック ---
         final_rows = []
         
+        # 1. Topの行をすべて登録
         top_rows = results.get("Top", {}).get("table_rows", [])
-        bottom_rows = results.get("Bottom", {}).get("table_rows", [])
         
-        # 1. Topの行を追加（クリーニング適用）
+        # 指紋マップを作成 (Signature -> Index)
+        top_signatures = {}
+        
         for row in top_rows:
             if not row or all(str(c).strip() == "" for c in row): continue
             
+            # ヘッダー行っぽいならスキップ（誤ってデータに入ることがあるため）
+            if self._is_header_row(row): continue
+
             cleaned_row = [self._clean_text(c) for c in row]
+            
+            # 指紋作成
+            sig = self._get_row_signature(cleaned_row)
+            
+            # 指紋が有効（日付や金額がある）なら記録、なければそのまま追加
+            if sig:
+                top_signatures[sig] = len(final_rows)
+            
             final_rows.append(cleaned_row)
 
-        # 2. Bottomの行をチェックして追加
+        # 2. Bottomの行をマージ
+        bottom_rows = results.get("Bottom", {}).get("table_rows", [])
+        
         for b_row in bottom_rows:
             if not b_row or all(str(c).strip() == "" for c in b_row): continue
+            
+            # Bottom側のヘッダー行は絶対に無視
+            if self._is_header_row(b_row): continue
 
             b_cleaned = [self._clean_text(c) for c in b_row]
+            b_sig = self._get_row_signature(b_cleaned)
             
-            # 重複チェック（Topにある行か？）
-            match_index = -1
-            for i, t_row in enumerate(final_rows):
-                if len(t_row) != len(b_cleaned): continue
+            # Topに同じ指紋を持つ行があるか？
+            if b_sig and b_sig in top_signatures:
+                idx = top_signatures[b_sig]
+                existing_row = final_rows[idx]
                 
-                # 内容の一致度チェック
-                match_count = 0
-                non_empty_count = 0
-                for v1, v2 in zip(t_row, b_cleaned):
-                    if v1 or v2: non_empty_count += 1
-                    if v1 and v2 and v1 == v2: match_count += 1
+                # 重複あり！
+                # 列数が多い（情報量が多い）方を採用する
+                # Topが7列、Bottomが6列なら、Topを残す
+                if len(b_cleaned) > len(existing_row):
+                     final_rows[idx] = b_cleaned
                 
-                if non_empty_count > 0 and (match_count / non_empty_count) > 0.8:
-                    match_index = i
-                    break
+                # もし列数が同じなら、文字数が多い方を採用（摘要が欠けていない方）
+                elif len(b_cleaned) == len(existing_row):
+                    b_len = sum(len(c) for c in b_cleaned)
+                    t_len = sum(len(c) for c in existing_row)
+                    if b_len > t_len:
+                         final_rows[idx] = b_cleaned
+                
+                # Topの方が優秀なら何もしない（Bottomを捨てる）
             
-            if match_index != -1:
-                # 既存行の補完（長い方を採用）
-                existing = final_rows[match_index]
-                merged_row = []
-                for t_val, b_val in zip(existing, b_cleaned):
-                    if len(b_val) > len(t_val):
-                        merged_row.append(b_val)
-                    else:
-                        merged_row.append(t_val)
-                final_rows[match_index] = merged_row
             else:
-                # 新規行として追加
+                # Topに存在しない新しい行なら、末尾に追加
                 final_rows.append(b_cleaned)
 
         combined_json["table_rows"] = final_rows
@@ -278,7 +301,7 @@ class OcrEngine:
         
         formatted_rows.append([{'text': ""}])
 
-        # 2. ヘッダー（ここでも強制クリーニング）
+        # 2. ヘッダー
         headers = combined_json.get("table_headers", [])
         if headers:
             clean_headers = [self._clean_text(h) for h in headers]
@@ -329,7 +352,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Layout-Safe Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Signature-Merge Mode...")
         if not self.model: return [[{'text': "Error: AI Model not initialized."}]]
 
         uploaded_file.seek(0)
