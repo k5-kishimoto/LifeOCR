@@ -38,7 +38,7 @@ class OcrEngine:
     def _process_single_page(self, args):
         page_label, pil_image = args
         optimized_image = self._optimize_image(pil_image)
-
+        # OCRプロンプトの定義
         prompt = """
         You are a high-precision OCR engine specialized in Japanese documents.
         Your task is to transcribe the text in the image into a JSON 2D array.
