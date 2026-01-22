@@ -11,6 +11,10 @@ RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     libgomp1 \
     poppler-utils \
+    # ★ここに追加: 日本語フォントをインストール
+    fonts-noto-cjk \
+    fonts-noto-cjk-extra \
+    fonts-ipafont-gothic \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /code
