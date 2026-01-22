@@ -6,7 +6,8 @@ import re
 import concurrent.futures
 from pdf2image import convert_from_bytes
 import google.generativeai as genai
-from PIL import Image
+# ★ ImageOps を追加（自動補正用）
+from PIL import Image, ImageEnhance, ImageOps 
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,80 +25,96 @@ class OcrEngine:
             genai.configure(api_key=self.api_key)
             self.model_name = os.environ.get("GEMINI_VERSION", "gemini-2.5-flash")
             
-            # ★変更点1: JSONモードを強制する設定を追加
-            # response_mime_type="application/json" を指定すると、
-            # AIは構文エラーのない完璧なJSONを返すよう強制されます。
+            # JSONモードの設定
             self.generation_config = genai.types.GenerationConfig(
                 temperature=0.0, 
                 top_p=1.0,
                 max_output_tokens=8192,
-                response_mime_type="application/json"  # <--- これが決定打です
+                response_mime_type="application/json"
             )
             
             self.model = genai.GenerativeModel(
                 model_name=self.model_name,
                 generation_config=self.generation_config
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (JSON Mode ON)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Auto-Enhance Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
 
     def _optimize_image(self, img):
-        # 精度維持のため2560px
+        """
+        ★ スマート画像補正
+        画像ごとに最適な濃さを自動計算し、副作用なく視認性を上げます。
+        """
+        # 1. サイズ調整
         max_size = 2560 
         if max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        
+        # RGBモードを確認（オートコントラストに必要）
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # 2. ★自動コントラスト調整 (Auto Contrast)
+        # 画像の最も暗い部分を「完全な黒」、明るい部分を「完全な白」に引き伸ばします。
+        # これにより、薄いグレーの文字は「黒」に近づき、元々黒い文字はそのまま維持されます。
+        # cutoff=1 は、ノイズ（極端な点）を1%無視して計算する設定です。
+        img = ImageOps.autocontrast(img, cutoff=1)
+        
+        # 3. 控えめなシャープネス (1.5倍は強すぎるので1.1倍に)
+        enhancer = ImageEnhance.Sharpness(img)
+        img = enhancer.enhance(1.1) 
+        
         return img
 
     def _process_single_page(self, args):
         page_label, pil_image = args
+        
+        # スマート補正の適用
         optimized_image = self._optimize_image(pil_image)
         
-        # WebP変換
         img_byte_arr = io.BytesIO()
         optimized_image.save(img_byte_arr, format='WEBP', quality=85)
         img_bytes = img_byte_arr.getvalue()
         
         image_part = {"mime_type": "image/webp", "data": img_bytes}
 
-        # ★変更点2: JSONモード用のプロンプト
-        # 出力形式を配列の配列ではなく、オブジェクト {"data": [[...]]} に指定した方が
-        # GeminiのJSONモードは安定します。
         prompt = """
-        You are a high-precision OCR engine specialized in Japanese business documents.
+        You are an expert OCR engine for Japanese bank statements (通帳/明細).
         
         [Task]
-        Extract the table data from the image into a JSON object.
+        Extract ALL transaction rows into a JSON object.
+        Focus specifically on capturing "Description (摘要)", "Branch Name (取扱店)", and "Bank Name".
         
         [Output Schema]
-        Return a JSON object with a single key "table_data" containing a 2D array (list of lists) of strings.
+        Return a JSON object with a key "table_data" containing a 2D array.
         Example:
         {
           "table_data": [
-            ["Header1", "Header2"],
-            ["Row1Col1", "Row1Col2"]
+            ["Year-Month-Day", "Description(摘要)", "Amount(支払)", "Amount(入金)", "Balance(差引残高)", "Branch(取扱店)"],
+            ["2026-01-22", "振込 ヤマダタロウ", "10000", "", "50000", "本店"]
           ]
         }
 
         [Strict Rules]
-        1. **Accuracy**: Transcribe exactly as written. No guessing.
-        2. **Empty Cells**: Use empty string "" for blank cells. Do NOT use null.
-        3. **Japanese**: Remove spaces between Japanese characters (e.g., "東 京" -> "東京").
-        4. **Structure**: Ensure every row has the same number of columns.
+        1. **Missing Text**: The Japanese text might be faint. Look closely for Kanji/Kana in the "Description" and "Branch" columns.
+        2. **Empty Cells**: Use empty string "" for blank cells. Never use null.
+        3. **Formatting**: 
+           - Remove spaces between Japanese chars ("海 銀" -> "海銀").
+           - Keep numbers as strings (e.g. "10,000").
         """
 
         retry_models = [
-            self.model_name,            
-            'gemini-2.5-pro',
-            'gemini-2.0-flash'
+            self.model_name,            # 1. gemini-2.5-flash
+            'gemini-2.5-pro',           # 2. gemini-2.5-pro
+            'gemini-2.0-flash'          # 3. gemini-2.0-flash
         ]
         
         retry_models = list(dict.fromkeys(retry_models))
 
         for current_model_name in retry_models:
             try:
-                # 設定適用
                 current_model = genai.GenerativeModel(
                     current_model_name,
                     generation_config=self.generation_config
@@ -108,9 +125,7 @@ class OcrEngine:
                 
                 data_list = []
                 
-                # --- JSON解析（JSONモードなので非常にシンプルになります） ---
                 try:
-                    # JSONモードならMarkdown記法(```json)はつかないはずだが、念のためクリーニング
                     cleaned_text = raw_text.strip()
                     if cleaned_text.startswith("```json"):
                         cleaned_text = cleaned_text[7:-3]
@@ -119,24 +134,19 @@ class OcrEngine:
 
                     parsed_json = json.loads(cleaned_text)
                     
-                    # プロンプトで指定したキー "table_data" を取り出す
                     if isinstance(parsed_json, dict) and "table_data" in parsed_json:
                         data_list = parsed_json["table_data"]
                     elif isinstance(parsed_json, list):
-                        # 万が一配列で返ってきた場合
                         data_list = parsed_json
                     else:
-                        # 想定外の構造
                         raise ValueError("Unexpected JSON structure")
 
                 except (json.JSONDecodeError, ValueError) as json_err:
-                    # それでも壊れた場合のバックアップ（リカバリー）
-                    print(f"⚠️ JSON Broken on {page_label} ({json_err}). Attempting regex recovery...")
+                    print(f"⚠️ JSON Broken on {page_label}. Recovery...")
                     rows = re.findall(r'\[(.*?)\]', raw_text)
                     if rows:
                         for r in rows:
                             try:
-                                # 中身が "val", "val" のようになっているかチェック
                                 if '"' in r or "'" in r:
                                     row_data = json.loads(f"[{r}]")
                                     data_list.append(row_data)
@@ -145,7 +155,6 @@ class OcrEngine:
                     if not data_list:
                         data_list = [[line] for line in raw_text.split('\n') if line.strip()]
                 
-                # アプリ形式に変換
                 formatted_rows = []
                 for row in data_list:
                     def clean_text(val):
@@ -166,7 +175,6 @@ class OcrEngine:
             except Exception as e:
                 error_msg = str(e)
                 print(f"⚠️ Failed ({page_label}) with {current_model_name}: {error_msg}")
-                
                 if "404" in error_msg or "not found" in error_msg or "429" in error_msg or "500" in error_msg:
                     continue
                 else:
@@ -176,7 +184,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Native JSON Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Auto-Enhance Mode...")
         
         if not self.model:
             return [[{'text': "Error: AI Model not initialized."}]]
@@ -193,7 +201,8 @@ class OcrEngine:
 
         if filename.endswith('.pdf'):
             try:
-                pil_images = convert_from_bytes(file_bytes, dpi=200, fmt='jpeg')
+                # DPIは300のままでOK（高精細化は副作用が少ないため）
+                pil_images = convert_from_bytes(file_bytes, dpi=300, fmt='jpeg')
                 for i, img in enumerate(pil_images):
                     images_to_process.append((f"Page {i+1}", img))
             except Exception as e:
