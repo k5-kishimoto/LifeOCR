@@ -27,10 +27,9 @@ class OcrEngine:
             genai.configure(api_key=self.api_key)
             self.model_name = os.environ.get("GEMINI_VERSION", "gemini-2.5-flash")
             
-            # ★修正点: 温度(Temperature)を上げて「推測」を許容する
             self.generation_config = genai.types.GenerationConfig(
-                temperature=0.3,   # 0.0(厳格) -> 0.3(推測許可)
-                top_p=0.95,        # 突飛な幻覚は防ぐ
+                temperature=0.3, 
+                top_p=0.95,
                 max_output_tokens=8192,
                 response_mime_type="application/json"
             )
@@ -47,7 +46,7 @@ class OcrEngine:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Creative-Read Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Natural-Order Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
@@ -60,15 +59,11 @@ class OcrEngine:
         max_size = 2560 
         if max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-        
         if img.mode != 'RGB':
             img = img.convert('RGB')
-        
-        # コントラストをさらに強める
-        img = ImageOps.autocontrast(img, cutoff=2) # cutoffを少し上げてノイズを飛ばす
+        img = ImageOps.autocontrast(img, cutoff=2)
         enhancer = ImageEnhance.Sharpness(img)
-        img = enhancer.enhance(1.5) # シャープネスも強め
-        
+        img = enhancer.enhance(1.5) 
         return img
 
     def _split_image(self, img):
@@ -80,29 +75,25 @@ class OcrEngine:
         return [("Top", crop_top), ("Bottom", crop_bottom)]
 
     # =========================================================================
-    # 🧠 データ解析・修復
+    # 🧠 データ解析
     # =========================================================================
 
     def _repair_json(self, text):
         if not text: return None
-        
         try:
             cleaned = text.strip()
             if cleaned.startswith("```json"): cleaned = cleaned[7:-3]
             elif cleaned.startswith("```"): cleaned = cleaned[3:-3]
             return json.loads(cleaned)
-        except:
-            pass
+        except: pass
 
         try:
             if cleaned.count('"') % 2 != 0: cleaned += '"'
             if not cleaned.endswith("}"): cleaned += "}]}"
             return json.loads(cleaned)
-        except:
-            pass
+        except: pass
             
         try:
-            # どんな形式でも拾うロジック
             candidate_rows = re.findall(r'\[(.*?)\]', text, re.DOTALL)
             valid_rows = []
             for row_content in candidate_rows:
@@ -113,14 +104,12 @@ class OcrEngine:
                         valid_rows.append(row_data)
                         continue
                 except: pass
-                
                 try:
                     row_data = ast.literal_eval(f"[{row_content}]")
                     if isinstance(row_data, list): 
                         valid_rows.append(row_data)
                         continue
                 except: pass
-
                 try:
                     items = re.findall(r'"([^"]*)"', row_content)
                     if items: valid_rows.append(items)
@@ -128,28 +117,19 @@ class OcrEngine:
 
             if valid_rows:
                 return {"table_rows": valid_rows}
-        except:
-            pass
-
+        except: pass
         return None
 
     def _call_ai_api(self, image_part, part_label):
-        
-        # ★修正: プロンプトでも「推測」を許可する
         prompt = """
-        あなたは日本語OCRエンジンです。
-        画像からテキストを抽出してください。
+        あなたは日本語OCRエンジンです。画像からテキストを抽出してください。
         
-        【重要命令: 積極的な読み取り】
-        - **迷ったら推測して書いてください。**
-        - 文字が薄くても、ノイズがあっても、そこに行があるなら空欄にせず、一番近い文字を推測して埋めてください。
-        - 「読めないから無視する」は禁止です。
+        【重要命令】
+        - 迷ったら推測して埋めること。空欄禁止。
+        - 半角カナは半角のまま出力。
+        - すべての値をダブルクォートで囲む。
+        - **行の順番を変えないでください。上から順に出力してください。**
 
-        【抽出ルール】
-        1. **項目名**: ヘッダー内の改行はつなげる（例:「お預り\n金額」→「お預り金額」）。
-        2. **文字種**: 半角カナ(`ﾌﾘｺﾐ`)は半角のまま。
-        3. **データ型**: すべての値をダブルクォートで囲む。
-        
         【出力フォーマット (JSON)】
         {
           "document_info": { "title": "タイトル", "org_name": "発行元", "sub_name": "支店", "account_name": "名義", "period": "期間", "other_info": "その他" },
@@ -160,75 +140,116 @@ class OcrEngine:
         }
         """
 
-        retry_models = [
-            self.model_name,
-            'gemini-2.5-pro',
-            'gemini-2.0-flash'
-        ]
+        retry_models = [self.model_name, 'gemini-2.5-pro', 'gemini-2.0-flash']
         
         for current_model_name in retry_models:
             try:
-                # モデルごとに設定を適用
                 current_model = genai.GenerativeModel(
                     current_model_name,
                     generation_config=self.generation_config,
                     safety_settings=self.safety_settings
                 )
-                
                 response = current_model.generate_content([prompt, image_part])
-                
                 try:
-                    if not response.candidates:
-                        raise ValueError("No candidates")
-                    finish_reason = response.candidates[0].finish_reason
-                    if finish_reason != 1: 
-                         print(f"⚠️ Warning ({part_label}): Finish reason is {finish_reason}")
+                    if not response.candidates: raise ValueError("No candidates")
                     return response.text
                 except ValueError as ve:
                     if response.candidates and response.candidates[0].content.parts:
                         return response.candidates[0].content.parts[0].text
                     raise ve
-
             except Exception as e:
                 print(f"⚠️ API Error ({part_label} - {current_model_name}): {e}")
                 time.sleep(1)
                 continue
-        
         return None
 
     # =========================================================================
-    # 🔄 結合・整形
+    # 🔄 スマート結合・整形（順序維持バージョン）
     # =========================================================================
 
     def _merge_split_results(self, results):
         combined_json = { "document_info": {}, "table_headers": [], "table_rows": [] }
 
+        # Top情報を優先
         target_source = "Top" if "Top" in results else "Bottom"
         if target_source in results:
             combined_json["document_info"] = results[target_source].get("document_info", {})
             combined_json["table_headers"] = results[target_source].get("table_headers", [])
 
-        raw_rows = []
-        if "Top" in results: raw_rows.extend(results["Top"].get("table_rows", []))
-        if "Bottom" in results: raw_rows.extend(results["Bottom"].get("table_rows", []))
-
-        seen = set()
-        unique_rows = []
-        for row in raw_rows:
+        # --- 順序維持のマージロジック ---
+        # 1. まず「Top」の結果をそのまま採用（これが文書の上半分なので順序は正しい）
+        final_rows = []
+        
+        top_rows = results.get("Top", {}).get("table_rows", [])
+        bottom_rows = results.get("Bottom", {}).get("table_rows", [])
+        
+        # Topの行を追加（クリーニングしつつ）
+        for row in top_rows:
             if not row or all(str(c).strip() == "" for c in row): continue
             
-            row_vals = []
+            cleaned_row = []
             for c in row:
-                if isinstance(c, (dict, list)): row_vals.append(str(c))
-                else: row_vals.append(str(c).strip())
-            
-            row_id = "".join(row_vals)
-            if row_id and row_id not in seen:
-                seen.add(row_id)
-                unique_rows.append(row)
+                val = str(c) if isinstance(c, (dict, list)) else str(c).strip()
+                val = val.replace("■", " ") # ノイズ除去
+                cleaned_row.append(val)
+            final_rows.append(cleaned_row)
+
+        # 2. 「Bottom」の行をチェックして、新しい行なら末尾に追加する
+        # （TopとBottomの重複部分は、Topを正として、Bottom側の情報で補完する）
         
-        combined_json["table_rows"] = unique_rows
-        return combined_json, len(unique_rows)
+        for b_row in bottom_rows:
+            if not b_row or all(str(c).strip() == "" for c in b_row): continue
+
+            b_cleaned = []
+            for c in b_row:
+                val = str(c) if isinstance(c, (dict, list)) else str(c).strip()
+                val = val.replace("■", " ")
+                b_cleaned.append(val)
+            
+            # このBottom行が、すでにTop行（final_rows）に含まれているかチェック
+            match_index = -1
+            
+            for i, t_row in enumerate(final_rows):
+                # 列数が違うなら別の行
+                if len(t_row) != len(b_cleaned): continue
+                
+                # 内容の一致度をチェック
+                # 「同じ日付」かつ「同じ金額」なら同一行とみなす、などの判定
+                match_count = 0
+                non_empty_count = 0
+                
+                for v1, v2 in zip(t_row, b_cleaned):
+                    if v1 or v2: non_empty_count += 1
+                    if v1 and v2 and v1 == v2: match_count += 1
+                
+                # 8割以上一致していれば「同じ行（重複）」とみなす
+                if non_empty_count > 0 and (match_count / non_empty_count) > 0.8:
+                    match_index = i
+                    break
+            
+            if match_index != -1:
+                # 重複が見つかった場合：
+                # Bottomの方が情報量が多い（文字数が多い）場合のみ、既存行をアップデート（補完）する
+                # ※順序は変えない！
+                existing = final_rows[match_index]
+                merged_row = []
+                for t_val, b_val in zip(existing, b_cleaned):
+                    # シンプルに長い方を採用（情報の欠損を防ぐため）
+                    if len(b_val) > len(t_val):
+                        merged_row.append(b_val)
+                    else:
+                        merged_row.append(t_val)
+                final_rows[match_index] = merged_row
+            else:
+                # 重複が見つからない場合：
+                # これはBottom部分にしかない新しい行なので、末尾に追加
+                final_rows.append(b_cleaned)
+
+        # ★重要: ここで sort をしない！
+        # final_rows.sort(...) <--- これを削除しました
+
+        combined_json["table_rows"] = final_rows
+        return combined_json, len(final_rows)
 
     def _format_to_ui_data(self, combined_json):
         formatted_rows = []
@@ -265,17 +286,7 @@ class OcrEngine:
 
         # 明細データ
         for row in combined_json.get("table_rows", []):
-            def clean_cell(val):
-                if val is None: return ""
-                if isinstance(val, (dict, list)): return str(val)
-                s = str(val).strip()
-                if s.lower() in ["null", "none"]: return ""
-                return s
-
-            if isinstance(row, list):
-                formatted_cells = [{'text': clean_cell(cell)} for cell in row]
-            else:
-                formatted_cells = [{'text': clean_cell(row)}]
+            formatted_cells = [{'text': safe_str(cell)} for cell in row]
             formatted_rows.append(formatted_cells)
 
         return formatted_rows
@@ -294,7 +305,6 @@ class OcrEngine:
             future_to_part = {}
             for p_name, p_img in parts:
                 img_byte_arr = io.BytesIO()
-                # 最高画質を維持
                 p_img.save(img_byte_arr, format='WEBP', quality=100)
                 image_part = {"mime_type": "image/webp", "data": img_byte_arr.getvalue()}
                 
@@ -304,7 +314,6 @@ class OcrEngine:
             for future in concurrent.futures.as_completed(future_to_part):
                 p_name = future_to_part[future]
                 res_text = future.result()
-                
                 if res_text:
                     repaired_data = self._repair_json(res_text)
                     if repaired_data:
@@ -320,38 +329,29 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Creative-Read Mode...")
-        
-        if not self.model:
-            return [[{'text': "Error: AI Model not initialized."}]]
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Natural-Order Mode...")
+        if not self.model: return [[{'text': "Error: AI Model not initialized."}]]
 
         uploaded_file.seek(0)
         file_bytes = uploaded_file.read()
         
-        try:
-            filename = uploaded_file.name.lower()
-        except AttributeError:
-            filename = "unknown.jpg"
+        try: filename = uploaded_file.name.lower()
+        except: filename = "unknown.jpg"
             
         images_to_process = [] 
-
         if filename.endswith('.pdf'):
             try:
                 pil_images = convert_from_bytes(file_bytes, dpi=250, fmt='jpeg')
                 for i, img in enumerate(pil_images):
                     images_to_process.append((f"Page {i+1}", img))
-            except Exception as e:
-                print(f"❌ PDF Error: {e}")
-                return [[{'text': f"PDF Error: {e}"}]]
+            except Exception as e: return [[{'text': f"PDF Error: {e}"}]]
         else:
             img = Image.open(io.BytesIO(file_bytes))
             images_to_process.append(("Page 1", img))
 
         final_results = []
-
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future_to_page = {executor.submit(self._process_single_page, item): item[0] for item in images_to_process}
-            
             results_dict = {}
             for future in concurrent.futures.as_completed(future_to_page):
                 page_label, page_data = future.result()
@@ -360,10 +360,8 @@ class OcrEngine:
         for label, _ in images_to_process:
             if len(images_to_process) > 1:
                 final_results.append([{'text': f'--- {label} ---'}])
-            
             if label in results_dict:
                 final_results.extend(results_dict[label])
-
         return final_results
 
 engine = OcrEngine()
