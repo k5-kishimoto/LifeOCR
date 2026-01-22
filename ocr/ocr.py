@@ -26,6 +26,7 @@ class OcrEngine:
             genai.configure(api_key=self.api_key)
             self.model_name = os.environ.get("GEMINI_VERSION", "gemini-2.5-flash")
             
+            # JSONモード設定
             self.generation_config = genai.types.GenerationConfig(
                 temperature=0.0, 
                 top_p=1.0,
@@ -45,7 +46,7 @@ class OcrEngine:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Dynamic Header Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Multi-line Header Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
@@ -120,30 +121,36 @@ class OcrEngine:
         return None
 
     def _call_ai_api(self, image_part, part_label):
-        """Gemini API呼び出し（項目名自由化・プロンプト修正）"""
-        # ★修正: 具体的な項目名（日付、摘要など）を削除し、
-        # 「画像にあるものをそのまま抜き出せ」という指示に変更しました。
+        """Gemini API呼び出し（ヘッダー改行対応版）"""
+        
+        # ★修正ポイント: ヘッダーの改行処理ルールを追加
         prompt = """
         あなたは高精度の日本語OCRエンジンです。
         画像は書類の一部（上半分または下半分）です。
         見えている範囲のすべての情報を抽出し、JSONを返してください。
 
         【重要：抽出ルール】
-        1. **項目名の抽出**: 表のヘッダー（項目名）は、固定の形式を使わず、**画像に書かれている通りの言葉**をそのまま抽出してください。
+        1. **項目名の抽出と結合**: 
+           - 表のヘッダー（項目名）がセル内で改行されている場合は、**改行を無視して1つの単語につなげて**ください。
+           - 例:
+             「お預り
+               金額」 → 「お預り金額」
+             「差引
+               残高」 → 「差引残高」
         2. **文字種の維持**: 半角カナ(`ﾌﾘｺﾐ`)は半角のまま。全角変換禁止。
         3. **空白の維持**: 氏名の間のスペースは削除しない。
         
         【出力フォーマット (JSON)】
         {
           "document_info": { 
-             "title": "文書タイトル（明細書、請求書など）", 
-             "org_name": "発行元・銀行名など", 
-             "sub_name": "支店名・部署名など", 
+             "title": "文書タイトル", 
+             "org_name": "発行元", 
+             "sub_name": "支店・部署", 
              "account_name": "宛名・名義", 
-             "period": "期間・日付", 
+             "period": "期間", 
              "other_info": "その他" 
           },
-          "table_headers": ["(画像内のヘッダー項目1)", "(画像内のヘッダー項目2)", "..."],
+          "table_headers": ["(改行をつなげた項目名1)", "(改行をつなげた項目名2)", "..."],
           "table_rows": [ 
              ["データ1", "データ2", "..."] 
           ]
@@ -227,23 +234,18 @@ class OcrEngine:
         # 1. 文書情報
         doc_info = combined_json.get("document_info", {})
         
-        # タイトルも強調表示（太字）を解除するか、シンプルに表示
-        # ※ここではヘッダー属性(is_header)を外し、ただのテキストとして表示します
         title_text = safe_str(doc_info.get('title')) or ""
         if title_text:
-            formatted_rows.append([{'text': f"■ {title_text}"}]) # is_header: True を削除
+            formatted_rows.append([{'text': f"■ {title_text}"}])
         
-        # 組織・発行元情報
         org_info = []
-        if doc_info.get("org_name"): org_info.append(safe_str(doc_info['org_name'])) # アイコン削除でシンプルに
+        if doc_info.get("org_name"): org_info.append(safe_str(doc_info['org_name']))
         if doc_info.get("sub_name"): org_info.append(safe_str(doc_info['sub_name']))
-        # 旧 bank_name 対応（念のため）
         if doc_info.get("bank_name"): org_info.append(safe_str(doc_info['bank_name']))
         if doc_info.get("branch_name"): org_info.append(safe_str(doc_info['branch_name']))
         
         if org_info: formatted_rows.append([{'text': " ".join(org_info)}])
 
-        # 宛名・期間など
         meta_texts = []
         if doc_info.get("account_name"): meta_texts.append(f"名義: {safe_str(doc_info['account_name'])}")
         if doc_info.get("period"): meta_texts.append(f"期間: {safe_str(doc_info['period'])}")
@@ -252,12 +254,10 @@ class OcrEngine:
         
         formatted_rows.append([{'text': ""}])
 
-        # 2. 表ヘッダー（項目名）
-        # ★修正: 強調表示（is_header: True）を削除し、普通の行として追加
+        # 2. 表ヘッダー
         headers = combined_json.get("table_headers", [])
         if headers:
             clean_headers = [safe_str(h) for h in headers]
-            # ここを変更: is_header: True を削除
             formatted_rows.append([{'text': h} for h in clean_headers])
 
         # 3. 明細データ
@@ -316,7 +316,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Dynamic Header Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Multi-line Header Mode...")
         
         if not self.model:
             return [[{'text': "Error: AI Model not initialized."}]]
@@ -355,7 +355,6 @@ class OcrEngine:
 
         for label, _ in images_to_process:
             if len(images_to_process) > 1:
-                # ページ区切りも太字解除
                 final_results.append([{'text': f'--- {label} ---'}])
             
             if label in results_dict:
