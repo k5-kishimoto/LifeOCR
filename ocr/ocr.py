@@ -28,7 +28,7 @@ class OcrEngine:
             self.model_name = os.environ.get("GEMINI_VERSION", "gemini-2.5-flash")
             
             self.generation_config = genai.types.GenerationConfig(
-                temperature=0.0, 
+                temperature=0.0,
                 top_p=1.0,
                 max_output_tokens=8192,
                 response_mime_type="application/json"
@@ -46,7 +46,7 @@ class OcrEngine:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Universal-Raw Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Force-Column-Show Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
@@ -59,18 +59,11 @@ class OcrEngine:
         if val is None: return ""
         if isinstance(val, (dict, list)): val = str(val)
         val = str(val)
-        
-        # 改行削除
         val = val.replace("\n", "").replace("\r", "")
-        
-        # ノイズ削除 (図, □, ■)
+        # ノイズ削除
         val = val.replace("■", " ").replace("□", " ").replace("図", " ")
-        
-        # 連続スペース圧縮
         val = re.sub(r'\s+', ' ', val)
         return val.strip()
-
-    # ★削除: _is_header_row は汎用性を損なうため削除しました。
 
     # =========================================================================
     # 🖼️ 画像処理
@@ -90,7 +83,7 @@ class OcrEngine:
     def _split_image(self, img):
         width, height = img.size
         split_ratio = 0.60
-        overlap = 0.40
+        overlap = 0.40 
         crop_top = img.crop((0, 0, width, int(height * split_ratio)))
         crop_bottom = img.crop((0, int(height * overlap), width, height))
         return [("Top", crop_top), ("Bottom", crop_bottom)]
@@ -180,19 +173,20 @@ class OcrEngine:
         return None
 
     # =========================================================================
-    # 🔄 マージ処理 (キーワード判定なし・完全一致のみ排除)
+    # 🔄 マージ処理 (単純結合)
     # =========================================================================
 
     def _merge_split_results(self, results):
         combined_json = { "document_info": {}, "table_headers": [], "table_rows": [] }
 
+        # Top情報を優先
         target_source = "Top" if "Top" in results else "Bottom"
         if target_source in results:
             combined_json["document_info"] = results[target_source].get("document_info", {})
             combined_json["table_headers"] = results[target_source].get("table_headers", [])
 
         final_rows = []
-        seen_exact_rows = set() # 文字列としての完全一致だけ防ぐ
+        seen_exact_rows = set()
 
         source_order = ["Top", "Bottom"]
         
@@ -204,13 +198,11 @@ class OcrEngine:
             for row in raw_rows:
                 if not row or all(str(c).strip() == "" for c in row): continue
                 
-                # ★修正: ヘッダー行判定(_is_header_row)を削除しました。
-                # データ行かヘッダー行かに関わらず、全て処理対象とします。
+                # キーワードによるヘッダー判定は廃止（誤判定防止）
 
                 cleaned_row = [self._clean_text(c) for c in row]
                 
-                # 「文字列として完全に一致する行」だけは重複としてスキップする
-                # これにより、TopとBottomで全く同じヘッダーが読まれた場合は、自然に片方が消える
+                # 文字列としての完全一致だけ排除
                 row_str = str(cleaned_row)
                 if row_str in seen_exact_rows: continue
                 
@@ -221,7 +213,7 @@ class OcrEngine:
         return combined_json, len(final_rows)
 
     # =========================================================================
-    # 📊 UIデータ整形 & パディング
+    # 📊 UIデータ整形 & ★ヘッダー強制拡張 (修正の核心)
     # =========================================================================
 
     def _format_to_ui_data(self, combined_json):
@@ -251,22 +243,35 @@ class OcrEngine:
         raw_rows = combined_json.get("table_rows", [])
         
         max_cols = 0
-        if headers: max_cols = max(max_cols, len(headers))
+        if headers: 
+            max_cols = max(max_cols, len(headers))
         for row in raw_rows:
             max_cols = max(max_cols, len(row))
+        
+        # 最低でも1列
         max_cols = max(max_cols, 1)
 
-        # --- 3. ヘッダーの拡張 ---
+        # --- 3. ヘッダーの強制拡張 ---
+        # データが7列あるのにヘッダーが6列だと、7列目が表示されないUIが多いため、
+        # ヘッダーの数を強制的に max_cols まで増やす。
+        
+        clean_headers = []
         if headers:
             clean_headers = [self._clean_text(h) for h in headers]
-            while len(clean_headers) < max_cols:
-                clean_headers.append("")
+        
+        # ★重要: 空文字 "" だと表示されない場合があるので、"(列N)" のように文字を入れる
+        while len(clean_headers) < max_cols:
+            col_num = len(clean_headers) + 1
+            clean_headers.append(f"(列{col_num})")
+            
+        if clean_headers:
             formatted_rows.append([{'text': h} for h in clean_headers])
 
         # --- 4. データ行のパディング ---
         for row in raw_rows:
             clean_row = [self._clean_text(cell) for cell in row]
             
+            # データ行も足りない場合は空文字で埋める
             while len(clean_row) < max_cols:
                 clean_row.append("")
             
@@ -313,7 +318,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Universal-Raw Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Force-Column-Show Mode...")
         if not self.model: return [[{'text': "Error: AI Model not initialized."}]]
 
         uploaded_file.seek(0)
