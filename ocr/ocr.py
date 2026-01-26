@@ -28,7 +28,7 @@ class OcrEngine:
             self.model_name = os.environ.get("GEMINI_VERSION", "gemini-2.5-flash")
             
             self.generation_config = genai.types.GenerationConfig(
-                temperature=0.0, 
+                temperature=0.0, # 幻覚（図など）を減らすため0.0
                 top_p=1.0,
                 max_output_tokens=8192,
                 response_mime_type="application/json"
@@ -46,13 +46,13 @@ class OcrEngine:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Padding-Fix Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (As-Is Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
 
     # =========================================================================
-    # 🧹 クリーニング
+    # 🧹 クリーニング (図、□の除去)
     # =========================================================================
     
     def _clean_text(self, val):
@@ -60,32 +60,27 @@ class OcrEngine:
         if isinstance(val, (dict, list)): val = str(val)
         val = str(val)
         
-        # 改行削除
+        # 1. 改行削除
         val = val.replace("\n", "").replace("\r", "")
-        # ノイズ削除 (図, □, ■)
+        
+        # 2. ノイズ削除
+        # ログに見られた「図」や「□」をスペースに置換
         val = val.replace("■", " ").replace("□", " ").replace("図", " ")
-        # 連続スペース圧縮
+        
+        # 3. 連続スペースを1つに
         val = re.sub(r'\s+', ' ', val)
+        
         return val.strip()
 
     def _is_header_row(self, row):
         """ヘッダー行判定"""
-        header_keywords = ["日付", "摘要", "金額", "入金", "出金", "残高", "借方", "貸方", "区分", "支店名", "番号"]
+        header_keywords = ["日付", "摘要", "金額", "入金", "出金", "残高", "借方", "貸方", "区分", "支店名", "番号", "記号"]
         match_count = 0
         for cell in row:
             text = str(cell)
             if any(k in text for k in header_keywords):
                 match_count += 1
         return match_count >= 2
-
-    def _get_row_fingerprint(self, row):
-        """指紋作成（日付と数字のみ）"""
-        clean_row = [self._clean_text(c) for c in row]
-        row_text = "".join(clean_row)
-        numbers = re.findall(r'\d+', row_text)
-        if not numbers:
-            return row_text 
-        return "".join(numbers)
 
     # =========================================================================
     # 🖼️ 画像処理
@@ -105,7 +100,7 @@ class OcrEngine:
     def _split_image(self, img):
         width, height = img.size
         split_ratio = 0.60
-        overlap = 0.40
+        overlap = 0.40 
         crop_top = img.crop((0, 0, width, int(height * split_ratio)))
         crop_bottom = img.crop((0, int(height * overlap), width, height))
         return [("Top", crop_top), ("Bottom", crop_bottom)]
@@ -195,52 +190,51 @@ class OcrEngine:
         return None
 
     # =========================================================================
-    # 🔄 マージ処理 (Top優先 + 重複排除)
+    # 🔄 単純結合 (重複削除も最小限)
     # =========================================================================
 
     def _merge_split_results(self, results):
         combined_json = { "document_info": {}, "table_headers": [], "table_rows": [] }
 
+        # Top情報を優先
         target_source = "Top" if "Top" in results else "Bottom"
         if target_source in results:
             combined_json["document_info"] = results[target_source].get("document_info", {})
             combined_json["table_headers"] = results[target_source].get("table_headers", [])
 
         final_rows = []
-        seen_fingerprints = set()
+        seen_strings = set() # 完全一致排除用
 
-        # 1. Topの行
-        top_rows = results.get("Top", {}).get("table_rows", [])
-        for row in top_rows:
-            if not row or all(str(c).strip() == "" for c in row): continue
-            if self._is_header_row(row): continue
-
-            cleaned_row = [self._clean_text(c) for c in row]
-            fp = self._get_row_fingerprint(cleaned_row)
-            if fp: seen_fingerprints.add(fp)
+        # Top -> Bottom の順で単純に追加
+        source_order = ["Top", "Bottom"]
+        
+        for source in source_order:
+            if source not in results: continue
             
-            final_rows.append(cleaned_row)
-
-        # 2. Bottomの行
-        bottom_rows = results.get("Bottom", {}).get("table_rows", [])
-        for row in bottom_rows:
-            if not row or all(str(c).strip() == "" for c in row): continue
-            if self._is_header_row(row): continue
-
-            cleaned_row = [self._clean_text(c) for c in row]
-            fp = self._get_row_fingerprint(cleaned_row)
+            raw_rows = results[source].get("table_rows", [])
             
-            # 重複チェック（Bottom側を捨てる）
-            if fp and fp in seen_fingerprints:
-                continue 
-            
-            final_rows.append(cleaned_row)
+            for row in raw_rows:
+                if not row or all(str(c).strip() == "" for c in row): continue
+                
+                # ヘッダー行スキップ
+                if self._is_header_row(row): continue
+
+                cleaned_row = [self._clean_text(c) for c in row]
+                
+                # 完全に文字が一致する行だけは重複として弾く（二重表示防止）
+                # ※少しでも違えば（カナの有無など）、別行として表示する
+                row_str = str(cleaned_row)
+                if row_str in seen_strings:
+                    continue
+                
+                seen_strings.add(row_str)
+                final_rows.append(cleaned_row)
 
         combined_json["table_rows"] = final_rows
         return combined_json, len(final_rows)
 
     # =========================================================================
-    # 📊 UIデータ整形 & ★パディング処理 (ここを強化)
+    # 📊 UIデータ整形 & ★パディング処理
     # =========================================================================
 
     def _format_to_ui_data(self, combined_json):
@@ -269,32 +263,25 @@ class OcrEngine:
         headers = combined_json.get("table_headers", [])
         raw_rows = combined_json.get("table_rows", [])
         
-        # 全体の中で「最大の列数」を見つける
+        # 最大列数を計算
         max_cols = 0
-        if headers:
-            max_cols = max(max_cols, len(headers))
+        if headers: max_cols = max(max_cols, len(headers))
         for row in raw_rows:
             max_cols = max(max_cols, len(row))
-        
-        # 最低でも1列はあるように
         max_cols = max(max_cols, 1)
 
-        # --- 3. ヘッダーの追加とパディング ---
+        # --- 3. ヘッダーのパディング ---
         if headers:
-            # クリーニング
             clean_headers = [self._clean_text(h) for h in headers]
-            # パディング: 足りない分を空文字で埋める
             while len(clean_headers) < max_cols:
                 clean_headers.append("")
-            
             formatted_rows.append([{'text': h} for h in clean_headers])
 
-        # --- 4. データ行の追加とパディング ---
+        # --- 4. データ行のパディング ---
         for row in raw_rows:
             clean_row = [self._clean_text(cell) for cell in row]
             
-            # ★ここでパディング！
-            # 行の長さが max_cols より短い場合、空のセルを追加して長さを揃える
+            # ★行の長さが足りない場合、空欄を足して右端（カナ）が消えないようにする
             while len(clean_row) < max_cols:
                 clean_row.append("")
             
@@ -341,7 +328,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Padding-Fix Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - As-Is Mode...")
         if not self.model: return [[{'text': "Error: AI Model not initialized."}]]
 
         uploaded_file.seek(0)
