@@ -46,59 +46,31 @@ class OcrEngine:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Smart-Fingerprint Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Universal-Raw Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
 
     # =========================================================================
-    # 🧹 クリーニング & 指紋生成（ここが重要）
+    # 🧹 クリーニング
     # =========================================================================
     
     def _clean_text(self, val):
         if val is None: return ""
         if isinstance(val, (dict, list)): val = str(val)
         val = str(val)
+        
         # 改行削除
         val = val.replace("\n", "").replace("\r", "")
-        # ノイズ削除
+        
+        # ノイズ削除 (図, □, ■)
         val = val.replace("■", " ").replace("□", " ").replace("図", " ")
+        
         # 連続スペース圧縮
         val = re.sub(r'\s+', ' ', val)
         return val.strip()
 
-    def _is_header_row(self, row):
-        """ヘッダー行判定"""
-        header_keywords = ["日付", "摘要", "金額", "入金", "出金", "残高", "借方", "貸方", "区分", "支店名", "番号", "記号"]
-        match_count = 0
-        for cell in row:
-            text = str(cell)
-            if any(k in text for k in header_keywords):
-                match_count += 1
-        return match_count >= 2
-
-    def _get_row_fingerprint(self, row):
-        """
-        行の同一性を判定するための「指紋」を作成。
-        表記揺れ（2026年1月1日 vs 2026-01-01）を吸収するため、
-        「数字のみ」を抽出して連結する。
-        """
-        clean_row = [self._clean_text(c) for c in row]
-        row_text = "".join(clean_row)
-
-        # 1. 日付っぽい数字 (8桁 or 4-2-2桁) を探す
-        # 20260101 も 202611 も拾えるように、数字の塊を探す
-        numbers = re.findall(r'\d+', row_text)
-        
-        # 金額や日付が含まれていない行（要約など）は、テキストそのまま指紋にする
-        if not numbers:
-            return row_text
-        
-        # 数字をすべて連結したものを指紋とする
-        # 例: Top行 "2026年01月12日 49,650" -> "2026011249650"
-        #     Btm行 "2026-01-12 49,650"     -> "2026011249650"
-        #     これで完全一致とみなせる
-        return "".join(numbers)
+    # ★削除: _is_header_row は汎用性を損なうため削除しました。
 
     # =========================================================================
     # 🖼️ 画像処理
@@ -117,9 +89,8 @@ class OcrEngine:
 
     def _split_image(self, img):
         width, height = img.size
-        # 重複エリアを少し減らす（重複による混乱を避けるため）
         split_ratio = 0.60
-        overlap = 0.45 
+        overlap = 0.40
         crop_top = img.crop((0, 0, width, int(height * split_ratio)))
         crop_bottom = img.crop((0, int(height * overlap), width, height))
         return [("Top", crop_top), ("Bottom", crop_bottom)]
@@ -209,51 +180,41 @@ class OcrEngine:
         return None
 
     # =========================================================================
-    # 🔄 マージ処理 (Top優先 + 強力な重複排除)
+    # 🔄 マージ処理 (キーワード判定なし・完全一致のみ排除)
     # =========================================================================
 
     def _merge_split_results(self, results):
         combined_json = { "document_info": {}, "table_headers": [], "table_rows": [] }
 
-        # Top情報を優先
         target_source = "Top" if "Top" in results else "Bottom"
         if target_source in results:
             combined_json["document_info"] = results[target_source].get("document_info", {})
             combined_json["table_headers"] = results[target_source].get("table_headers", [])
 
         final_rows = []
-        seen_fingerprints = set()
+        seen_exact_rows = set() # 文字列としての完全一致だけ防ぐ
 
-        # 1. Topの行をすべて採用（これが最も信頼できるデータ）
-        if "Top" in results:
-            for row in results["Top"].get("table_rows", []):
+        source_order = ["Top", "Bottom"]
+        
+        for source in source_order:
+            if source not in results: continue
+            
+            raw_rows = results[source].get("table_rows", [])
+            
+            for row in raw_rows:
                 if not row or all(str(c).strip() == "" for c in row): continue
-                if self._is_header_row(row): continue
+                
+                # ★修正: ヘッダー行判定(_is_header_row)を削除しました。
+                # データ行かヘッダー行かに関わらず、全て処理対象とします。
 
                 cleaned_row = [self._clean_text(c) for c in row]
                 
-                fp = self._get_row_fingerprint(cleaned_row)
-                if fp: seen_fingerprints.add(fp)
+                # 「文字列として完全に一致する行」だけは重複としてスキップする
+                # これにより、TopとBottomで全く同じヘッダーが読まれた場合は、自然に片方が消える
+                row_str = str(cleaned_row)
+                if row_str in seen_exact_rows: continue
                 
-                final_rows.append(cleaned_row)
-
-        # 2. Bottomの行は「Topにない新しい行」だけ追加
-        if "Bottom" in results:
-            for row in results["Bottom"].get("table_rows", []):
-                if not row or all(str(c).strip() == "" for c in row): continue
-                if self._is_header_row(row): continue
-
-                cleaned_row = [self._clean_text(c) for c in row]
-                
-                # 指紋（数字のみ）で重複チェック
-                # これにより "2026年..." と "2026-..." の違いを無視して同一判定できる
-                fp = self._get_row_fingerprint(cleaned_row)
-                
-                if fp and fp in seen_fingerprints:
-                    # Topに既にある（重複）のでスキップ
-                    # Bottom側のデータは列ズレしていることが多いので、こちらを捨てるのが正解
-                    continue 
-                
+                seen_exact_rows.add(row_str)
                 final_rows.append(cleaned_row)
 
         combined_json["table_rows"] = final_rows
@@ -285,30 +246,27 @@ class OcrEngine:
         
         formatted_rows.append([{'text': ""}])
 
-        # --- 2. 表データのパディング準備 ---
+        # --- 2. 最大列数の計算 ---
         headers = combined_json.get("table_headers", [])
         raw_rows = combined_json.get("table_rows", [])
         
-        # 最大列数を計算
         max_cols = 0
         if headers: max_cols = max(max_cols, len(headers))
         for row in raw_rows:
             max_cols = max(max_cols, len(row))
         max_cols = max(max_cols, 1)
 
-        # --- 3. ヘッダーのパディング ---
+        # --- 3. ヘッダーの拡張 ---
         if headers:
             clean_headers = [self._clean_text(h) for h in headers]
             while len(clean_headers) < max_cols:
-                # ヘッダーが足りない場合は列名を追加
-                clean_headers.append(f"列{len(clean_headers)+1}")
+                clean_headers.append("")
             formatted_rows.append([{'text': h} for h in clean_headers])
 
         # --- 4. データ行のパディング ---
         for row in raw_rows:
             clean_row = [self._clean_text(cell) for cell in row]
             
-            # 行の長さが足りない場合、空欄を足して右端（カナ）が消えないようにする
             while len(clean_row) < max_cols:
                 clean_row.append("")
             
@@ -355,7 +313,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Smart-Fingerprint Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Universal-Raw Mode...")
         if not self.model: return [[{'text': "Error: AI Model not initialized."}]]
 
         uploaded_file.seek(0)
