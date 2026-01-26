@@ -24,6 +24,7 @@ class OcrEngine:
 
         try:
             genai.configure(api_key=self.api_key)
+            # 安定性の高い2.0-flashを使用
             self.model_name = os.environ.get("GEMINI_VERSION", "gemini-2.0-flash")
             
             self.generation_config = genai.types.GenerationConfig(
@@ -45,7 +46,7 @@ class OcrEngine:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Fixed-Matrix Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Rectangular-Output Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
@@ -57,6 +58,7 @@ class OcrEngine:
     def _clean_text(self, val):
         if val is None: return ""
         val = str(val).replace("\n", "").replace("\r", "")
+        # OCR特有の誤認識ノイズをスペースに
         val = val.replace("■", " ").replace("□", " ").replace("図", " ")
         return re.sub(r'\s+', ' ', val).strip()
 
@@ -70,9 +72,9 @@ class OcrEngine:
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
         if img.mode != 'RGB':
             img = img.convert('RGB')
-        img = ImageOps.autocontrast(img, cutoff=2)
+        img = ImageOps.autocontrast(img, cutoff=1)
         enhancer = ImageEnhance.Sharpness(img)
-        img = enhancer.enhance(1.4) 
+        img = enhancer.enhance(1.3) 
         return img
 
     def _split_image(self, img):
@@ -111,17 +113,16 @@ class OcrEngine:
 
     def _call_ai_api(self, image_part, part_label):
         prompt = """
-        あなたは高精度の日本語OCRエンジンです。画像内の表データを抽出してください。
+        あなたは日本語OCRエンジンです。画像から表データを抽出してください。
         
-        【重要命令】
-        - **改行コード禁止。**
-        - **半角カナはそのまま出力。**
-        - セル内に複数の単語がある場合はスペースで区切ること。
-        - 途中にある項目名（ヘッダー）も無視せず、データとして抽出してください。
+        【命令】
+        - 改行コード禁止。
+        - 半角カナはそのまま。
+        - 項目名（ヘッダー）もデータの一部として、上から順にすべて抽出してください。
 
         【出力フォーマット (JSON)】
         {
-          "document_info": { "title": "タイトル", "org_name": "発行元" },
+          "document_info": { "line1": "タイトルやヘッダー以外の情報" },
           "table_headers": ["項目1", "項目2", ...],
           "table_rows": [ 
              ["データ1", "データ2", "データ3", ...],
@@ -136,50 +137,52 @@ class OcrEngine:
             return None
 
     # =========================================================================
-    # 🔄 マージ & 完全行列化
+    # 🔄 マージ & ★完全長方形化 (パディング)
     # =========================================================================
 
     def _merge_and_pad(self, page_results):
-        combined_rows = []
+        raw_output_list = []
         seen_exact_rows = set()
 
         for res in page_results:
-            # メタ情報を追加
+            # 1. document_info (タイトル等) をリストに追加
             doc_info = res.get("document_info", {})
-            for k, v in doc_info.items():
-                if v: combined_rows.append([self._clean_text(v)])
+            for v in doc_info.values():
+                if v: raw_output_list.append([self._clean_text(v)])
 
-            # ヘッダーがあれば追加
+            # 2. table_headers を追加
             headers = res.get("table_headers", [])
-            if headers: combined_rows.append([self._clean_text(h) for h in headers])
+            if headers:
+                raw_output_list.append([self._clean_text(h) for h in headers])
 
-            # データ行
+            # 3. table_rows を追加
             for row in res.get("table_rows", []):
                 if not row or all(str(c).strip() == "" for c in row): continue
                 cleaned_row = [self._clean_text(c) for c in row]
                 
+                # 文字列として完全に一致する行のみ重複排除
                 row_str = str(cleaned_row)
                 if row_str not in seen_exact_rows:
                     seen_exact_rows.add(row_str)
-                    combined_rows.append(cleaned_row)
+                    raw_output_list.append(cleaned_row)
 
-        if not combined_rows: return []
+        if not raw_output_list: return []
 
-        # ★最大列数を計算してすべての行をパディング（長方形化）
-        max_cols = max(len(row) for row in combined_rows)
+        # ★【核心】最大列数を算出し、全行をその長さに揃える
+        max_cols = max(len(row) for row in raw_output_list)
         max_cols = max(max_cols, 1)
 
-        final_output = []
-        for row in combined_rows:
-            padded_row = row[:]
-            while len(padded_row) < max_cols:
-                padded_row.append("") # 枠を確保するために空文字で埋める
-            final_output.append([{'text': cell} for cell in padded_row])
+        final_rows = []
+        for row in raw_output_list:
+            padded = row[:]
+            while len(padded) < max_cols:
+                padded.append("") # 空セルを追加して長さを統一
+            final_rows.append([{'text': cell} for cell in padded])
 
-        return final_output
+        return final_rows
 
     # =========================================================================
-    # 🚀 メインエントリーポイント
+    # 🚀 メイン処理
     # =========================================================================
 
     def extract_text(self, uploaded_file):
@@ -189,31 +192,25 @@ class OcrEngine:
         uploaded_file.seek(0)
         file_bytes = uploaded_file.read()
         
+        # ファイル形式の判別
         try:
             filename = uploaded_file.name.lower()
-        except AttributeError:
+        except:
             filename = "unknown.jpg"
 
-        # 1. PDFか画像かを判別してPILイメージのリストを作成
         pil_images = []
         try:
             if filename.endswith('.pdf'):
-                # PDFを画像に変換
                 pil_images = convert_from_bytes(file_bytes, dpi=200)
             else:
-                # 通常の画像として開く
                 pil_images = [Image.open(io.BytesIO(file_bytes))]
         except Exception as e:
             return [[{'text': f"❌ File Recognition Error: {e}"}]]
 
-        final_results = []
+        all_pages_output = []
 
-        # 2. ページごとに処理
         for i, img in enumerate(pil_images):
             page_label = f"Page {i+1}"
-            if len(pil_images) > 1:
-                final_results.append([{'text': f"--- {page_label} ---"}])
-
             optimized_img = self._optimize_image(img)
             parts = self._split_image(optimized_img)
             
@@ -228,10 +225,11 @@ class OcrEngine:
                     parsed = self._repair_json(res_text)
                     if parsed: page_data_list.append(parsed)
 
-            # ページ内の結果をマージ＆パディング
-            padded_page_data = self._merge_and_pad(page_data_list)
-            final_results.extend(padded_page_data)
+            padded_page = self._merge_and_pad(page_data_list)
+            if len(pil_images) > 1:
+                all_pages_output.append([{'text': f"--- {page_label} ---"}] + ([{'text': ''}] * (len(padded_page[0])-1 if padded_page else 0)))
+            all_pages_output.extend(padded_page)
 
-        return final_results
+        return all_pages_output
 
 engine = OcrEngine()
