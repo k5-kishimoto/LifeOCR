@@ -2,11 +2,10 @@ import os
 import json
 import io
 import re
-import concurrent.futures
 from pdf2image import convert_from_bytes
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
-from PIL import Image, ImageEnhance, ImageOps 
+from PIL import Image, ImageOps 
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,7 +27,7 @@ class OcrEngine:
                 ),
                 safety_settings={cat: HarmBlockThreshold.BLOCK_NONE for cat in HarmCategory}
             )
-            print(f"⚙️ Mode: Table-Optimizer Mode")
+            print(f"⚙️ Mode: Trailing-Trim Optimizer")
         except Exception as e:
             print(f"❌ Error: {e}")
 
@@ -40,18 +39,20 @@ class OcrEngine:
         return re.sub(r'\s+', ' ', val).strip()
 
     def _call_ai_api(self, image_part):
+        # AIに対して「余計な空列を作らない」ように指示を強化
         prompt = """
         あなたは高精度のOCRエンジンです。画像内の表データを抽出してください。
         
         【ルール】
         - 改行禁止。
         - 半角カナは維持。
-        - 画像内のすべての行、すべての列を漏れなく抽出してください。
+        - **重要：画像に存在しない空の列（空の要素）を末尾に追加しないでください。**
+        - 各行、中身がある列までで出力を止めてください。
 
         【JSON形式】
         {
           "table_data": [ 
-             ["セル1", "セル2", "セル3"],
+             ["項目1", "項目2", "項目3"],
              ["データ1", "データ2", "データ3"]
           ]
         }
@@ -64,15 +65,15 @@ class OcrEngine:
 
     def _process_rows(self, raw_rows):
         """
-        行データをクリーンアップし、末尾の空セルを除去して行列化する
+        末尾の空セルを物理的に削除し、最小限の列数でマトリックス化する
         """
         cleaned_table = []
         for row in raw_rows:
-            # 各セルのクリーニング
+            # 1. 各セルのクリーニング
             cleaned_row = [self._clean_text(cell) for cell in row]
             
-            # ★重要：行の末尾にある「空の要素」をすべて削除する
-            # これをしないと、UI側でカナが右側に追いやられて消える
+            # 2. ★重要：行の右端（末尾）から空文字を削除していく
+            # 摘要カナ（7列目）より右にあるゴミを一掃します
             while cleaned_row and not cleaned_row[-1]:
                 cleaned_row.pop()
             
@@ -81,14 +82,15 @@ class OcrEngine:
 
         if not cleaned_table: return []
 
-        # 全体の中で最大列数を把握（パディング用）
+        # 3. 有効な最大列数にパディング（揃える）
         max_cols = max(len(row) for row in cleaned_table)
         
         final_matrix = []
         for row in cleaned_table:
-            # 長さを揃える（短い行にだけ空文字を足す）
+            # 足りない列だけを補完（今回のケースでは7列に揃うはず）
             padded_row = row + [""] * (max_cols - len(row))
-            final_matrix.append([{'text': cell} for cell in padded_row])
+            final_ui_row = [{'text': cell} for cell in padded_row]
+            final_matrix.append(final_ui_row)
             
         return final_matrix
 
@@ -97,7 +99,6 @@ class OcrEngine:
         file_bytes = uploaded_file.read()
         
         try:
-            # PDF/画像 変換
             if uploaded_file.name.lower().endswith('.pdf'):
                 images = convert_from_bytes(file_bytes, dpi=200)
             else:
@@ -110,10 +111,7 @@ class OcrEngine:
             if len(images) > 1:
                 all_results.append([{'text': f"--- Page {i+1} ---"}])
 
-            # 画像最適化（コントラスト調整のみ）
             img = ImageOps.autocontrast(img.convert('RGB'), cutoff=1)
-            
-            # 分割せずに1ページ丸ごと投げる（ズレ防止）
             img_byte_arr = io.BytesIO()
             img.save(img_byte_arr, format='WEBP')
             
