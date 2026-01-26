@@ -1,238 +1,228 @@
 import os
 import json
 import io
-import time
 import re
 import concurrent.futures
+from typing import List, Dict, Any, Optional
+
 from pdf2image import convert_from_bytes
 import google.generativeai as genai
-from PIL import Image, ImageEnhance, ImageOps 
+from PIL import Image, ImageOps
 from dotenv import load_dotenv
 
+# .envファイルから環境変数を読み込み
 load_dotenv()
 
 class OcrEngine:
-    def __init__(self):
-        self.api_key = os.environ.get("GEMINI_API_KEY")
-        self.model = None
-        
-        if not self.api_key:
-            print("❌ Error: 'GEMINI_API_KEY' not found.")
-            return
+    """
+    銀行明細などの画像/PDFからテキストを抽出するOCRエンジンクラス。
+    Gemini APIを利用し、構造化された2次元リスト形式でデータを返却します。
+    """
 
+    def __init__(self):
+        # APIキーの取得
+        self.api_key = os.environ.get("GEMINI_API_KEY")
+        # モデル名は環境変数から取得（デフォルトは安定の2.0-flash）
+        self.model_name = os.environ.get("GEMINI_VERSION", "gemini-2.0-flash")
+        # モデルの初期化
+        self.model = self._setup_model()
+
+    def _setup_model(self) -> Optional[genai.GenerativeModel]:
+        """
+        AIモデルの初期設定を行います。
+        セーフティ設定による400エラーを回避するための重要なフェーズです。
+        """
+        if not self.api_key:
+            print("❌ エラー: GEMINI_API_KEYが設定されていません。")
+            return None
+        
         try:
             genai.configure(api_key=self.api_key)
-            self.model_name = os.environ.get("GEMINI_VERSION", "gemini-2.5-flash")
             
-            self.generation_config = genai.types.GenerationConfig(
-                temperature=0.0, 
-                top_p=1.0,
-                max_output_tokens=8192,
-                response_mime_type="application/json"
-            )
-            
-            self.model = genai.GenerativeModel(
+            # 400エラー（リクエスト拒絶）を避けるため、
+            # サポートされている基本4カテゴリーのみに制限してBLOCK_NONEを設定
+            safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ]
+
+            return genai.GenerativeModel(
                 model_name=self.model_name,
-                generation_config=self.generation_config
+                generation_config={
+                    "temperature": 0.0, # 抽出精度を上げるためランダム性を排除
+                    "response_mime_type": "application/json" # JSONで返却を強制
+                },
+                safety_settings=safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Half-width Kana Mode)")
-
         except Exception as e:
-            print(f"❌ API Configuration Error: {e}")
+            print(f"❌ モデルセットアップ失敗: {e}")
+            return None
 
-    def _optimize_image(self, img):
+    # -------------------------------------------------------------------------
+    # データクレンジング・前処理
+    # -------------------------------------------------------------------------
+
+    def _clean_value(self, val: Any) -> str:
         """
-        半角カナのための画像補正
+        AIから返ってきた生データを、人間（とUI）が見やすい形式に整えます。
+        特に'None'や'null'の混入を徹底的に防ぎます。
         """
-        max_size = 2560 
-        if max(img.size) > max_size:
-            img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        if val is None:
+            return ""
         
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
+        # 文字列に変換して前後の空白を除去
+        s = str(val).strip()
         
-        # 1. オートコントラストで文字を濃くする
-        img = ImageOps.autocontrast(img, cutoff=1)
+        # AIが文字列として "None" や "null" と返してきた場合も空文字にする
+        if s.lower() in ["none", "null"]:
+            return ""
         
-        # 2. ★変更点: シャープネスを少し強め(1.4倍)にして、細い半角カナの輪郭を立てる
-        enhancer = ImageEnhance.Sharpness(img)
-        img = enhancer.enhance(1.4) 
-        
-        return img
+        # セル内改行は表が崩れる原因になるため、スペースに置換
+        return s.replace("\n", " ").replace("\r", " ")
 
-    def _process_single_page(self, args):
-        page_label, pil_image = args
+    def _prepare_image_bytes(self, img: Image.Image) -> bytes:
+        """
+        OCRの精度を最大化するために画像を最適化します。
+        オートコントラストをかけ、AIが読みやすいWEBP形式に変換します。
+        """
+        # オートコントラスト：暗い文字をはっきりさせ、背景のノイズ（影など）を飛ばす
+        img = ImageOps.autocontrast(img.convert('RGB'), cutoff=1)
         
-        optimized_image = self._optimize_image(pil_image)
-        
-        img_byte_arr = io.BytesIO()
-        optimized_image.save(img_byte_arr, format='WEBP', quality=90) # 画質も少しアップ
-        img_bytes = img_byte_arr.getvalue()
-        
-        image_part = {"mime_type": "image/webp", "data": img_bytes}
+        buf = io.BytesIO()
+        # WEBPは軽量で高画質なため、API転送速度と精度のバランスが良い
+        img.save(buf, format='WEBP', quality=90)
+        return buf.getvalue()
 
-        # ★ここを修正：半角カナ維持のための強力な指示を追加
+    # -------------------------------------------------------------------------
+    # AI 実行コアロジック
+    # -------------------------------------------------------------------------
+
+    def _request_ocr(self, image_bytes: bytes) -> List[List[str]]:
+        """
+        Gemini APIにリクエストを投げ、レスポンスからデータの塊を抽出します。
+        """
         prompt = """
-        あなたは高精度の日本語OCRエンジンです。
-        提供された画像（通帳、銀行明細など）からテキスト情報を抽出し、JSONデータを返してください。
-
-        【最重要ルール：文字種の維持】
-        1. **半角カナは「半角」のまま出力すること**:
-           - 画像に `ﾌﾘｺﾐ` とあれば、必ず `ﾌﾘｺﾐ` と出力してください。
-           - 絶対に `フリコミ` (全角) に変換しないでください。
-        2. **記号の維持**:
-           - `ｶ)` や `ﾋ)` などの括弧付き記号もそのまま抽出してください。
-        
-        【タスク】
-        1. **文書情報**: タイトル、銀行名、支店名、口座名義、期間などを抽出。
-        2. **表データ**: 明細行をすべて抽出。
-
-        【出力フォーマット (JSON)】
-        {
-          "document_info": {
-             "title": "文書タイトル",
-             "bank_name": "銀行名",
-             "account_name": "口座名義",
-             "other_info": "その他メタデータ"
-          },
-          "table_headers": ["日付", "摘要", "お支払金額", "お預り金額", "差引残高", "取扱店"],
-          "table_rows": [
-             ["2026-01-22", "ﾌﾘｺﾐ ﾔﾏﾀﾞﾀﾛｳ", "10,000", "", "50,000", "本店"],
-             ["2026-01-23", "ﾃﾞﾝｷﾀﾞｲ", "5,000", "", "45,000", ""]
-          ]
-        }
+        あなたは日本語OCRエンジンです。画像内の情報を「2次元の配列」として抽出してください。
+        【重要】
+        - 行と列の構造を維持すること。
+        - カナ、数字、記号は見たままを維持すること。
+        - 摘要や名前などの「右端の列」を絶対に省略しないこと。
+        - 空欄（データなし）の場所はnullとして出力すること。
         """
+        try:
+            # 画像データとプロンプトをセット
+            content = [{"mime_type": "image/webp", "data": image_bytes}, prompt]
+            response = self.model.generate_content(content)
+            
+            # JSON文字列のクリーンアップ
+            raw_text = response.text.strip()
+            # Markdownのコードブロック(```json ... ```)を正規表現で除去
+            cleaned_json = re.sub(r'^```json\s*|\s*```$', '', raw_text, flags=re.MULTILINE)
+            parsed = json.loads(cleaned_json)
+            
+            # AIがどのようなキー名（data, table, rowsなど）で返してきても対応できるよう探索
+            if isinstance(parsed, dict):
+                # 可能性のある主要なキーをチェック
+                for key in ["data", "table", "rows"]:
+                    if key in parsed and isinstance(parsed[key], list):
+                        return parsed[key]
+                # キーが見当たらない場合、中身にある「最初のリスト」を拾い上げる
+                for v in parsed.values():
+                    if isinstance(v, list): return v
+            
+            # 辞書ではなく最初からリストで返ってきた場合
+            if isinstance(parsed, list):
+                return parsed
+                
+            return []
+        except Exception as e:
+            print(f"⚠️ OCRリクエスト中にエラーが発生: {e}")
+            return []
 
-        retry_models = [
-            self.model_name,
-            'gemini-2.5-pro', # 視力が良いので半角カナに強い
-            'gemini-2.0-flash'
-        ]
+    # -------------------------------------------------------------------------
+    # ページ管理・並列実行
+    # -------------------------------------------------------------------------
+
+    def _process_page(self, page_index: int, img: Image.Image) -> List[List[Dict[str, str]]]:
+        """
+        特定の1ページを処理するユニット。
+        スレッド並列化のためにメソッドを分離しています。
+        """
+        # 画像のバイト変換
+        image_bytes = self._prepare_image_bytes(img)
+        # AI実行
+        matrix = self._request_ocr(image_bytes)
         
-        retry_models = list(dict.fromkeys(retry_models))
-
-        for current_model_name in retry_models:
-            try:
-                current_model = genai.GenerativeModel(
-                    current_model_name,
-                    generation_config=self.generation_config
-                )
-                
-                response = current_model.generate_content([prompt, image_part])
-                raw_text = response.text
-                
-                formatted_rows = []
-
-                try:
-                    cleaned_text = raw_text.strip()
-                    if cleaned_text.startswith("```json"):
-                        cleaned_text = cleaned_text[7:-3]
-                    elif cleaned_text.startswith("```"):
-                        cleaned_text = cleaned_text[3:-3]
-
-                    parsed_json = json.loads(cleaned_text)
-                    
-                    # 1. 文書情報
-                    doc_info = parsed_json.get("document_info", {})
-                    if doc_info.get("title"):
-                        formatted_rows.append([{'text': f"■ {doc_info['title']}", 'is_header': True}])
-                    
-                    meta_texts = []
-                    if doc_info.get("bank_name"): meta_texts.append(doc_info["bank_name"])
-                    if doc_info.get("account_name"): meta_texts.append(f"名義: {doc_info['account_name']}")
-                    if doc_info.get("other_info"): meta_texts.append(doc_info["other_info"])
-                    
-                    if meta_texts:
-                        formatted_rows.append([{'text': " / ".join(meta_texts)}])
-                        formatted_rows.append([{'text': ""}])
-
-                    # 2. ヘッダー
-                    headers = parsed_json.get("table_headers", [])
-                    if headers:
-                        formatted_rows.append([{'text': h, 'is_header': True} for h in headers])
-
-                    # 3. データ
-                    rows = parsed_json.get("table_rows", [])
-                    for row in rows:
-                        def clean_text(val):
-                            if val is None: return ""
-                            s = str(val).strip()
-                            if s.lower() in ["null", "none"]: return ""
-                            return s
-
-                        if isinstance(row, list):
-                            formatted_cells = [{'text': clean_text(cell)} for cell in row]
-                        else:
-                            formatted_cells = [{'text': clean_text(row)}]
-                        formatted_rows.append(formatted_cells)
-
-                except (json.JSONDecodeError, ValueError) as json_err:
-                    print(f"⚠️ JSON Parse Error on {page_label}: {json_err}. Fallback.")
-                    lines = raw_text.split('\n')
-                    for line in lines:
-                        if line.strip():
-                            formatted_rows.append([{'text': line.strip()}])
-                
-                print(f"✅ Success ({page_label}) with {current_model_name}")
-                return (page_label, formatted_rows)
-
-            except Exception as e:
-                error_msg = str(e)
-                print(f"⚠️ Failed ({page_label}) with {current_model_name}: {error_msg}")
-                if "404" in error_msg or "not found" in error_msg or "429" in error_msg or "500" in error_msg:
-                    continue
-                else:
-                    return (page_label, [[{'text': f"Error: {error_msg}"}]])
-
-        return (page_label, [[{'text': "Failed to extract text."}]])
-
-
-    def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Half-width Kana Mode...")
+        page_results = []
+        # 画面上でわかりやすいようにページ見出しを挿入
+        page_results.append([{"text": f"--- Page {page_index + 1} ---"}])
         
+        if not matrix:
+            page_results.append([{"text": "⚠️ このページのデータ抽出に失敗しました"}])
+            return page_results
+
+        # 各行をUI用の辞書形式 [{'text': '...'}] にマッピング
+        for row in matrix:
+            if isinstance(row, list):
+                # リスト内の各要素をクレンジングして格納
+                page_results.append([{"text": self._clean_value(cell)} for cell in row])
+            else:
+                # 1列しかない行（タイトルなど）の場合
+                page_results.append([{"text": self._clean_value(row)}])
+        
+        return page_results
+
+    # -------------------------------------------------------------------------
+    # 公開メソッド（外部から呼び出すのはこれだけ）
+    # -------------------------------------------------------------------------
+
+    def extract_text(self, uploaded_file) -> List[List[Dict[str, str]]]:
+        """
+        アップロードされたファイルを読み取り、全ページのOCR結果を返します。
+        PDFの場合は自動的にページ分割して並列処理します。
+        """
         if not self.model:
-            return [[{'text': "Error: AI Model not initialized."}]]
+            return [[{"text": "AIモデルが正常に初期化されていません。"}]]
 
         uploaded_file.seek(0)
         file_bytes = uploaded_file.read()
         
+        # 1. 画像への変換処理
         try:
             filename = uploaded_file.name.lower()
-        except AttributeError:
-            filename = "unknown.jpg"
+            if filename.endswith('.pdf'):
+                # PDFはDPI 200程度が精度と速度のバランスが良い
+                images = convert_from_bytes(file_bytes, dpi=200)
+            else:
+                # 一般画像
+                images = [Image.open(io.BytesIO(file_bytes))]
+        except Exception as e:
+            return [[{"text": f"ファイルの読み込みに失敗しました: {e}"}]]
+
+        # 2. 並列処理の実行（スレッドプールを使用）
+        final_output = []
+        # max_workersはサーバー負荷に合わせて調整。4〜8が一般的
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            # ページごとにタスクを割り振り
+            future_to_page = {
+                executor.submit(self._process_page, i, img): i 
+                for i, img in enumerate(images)
+            }
             
-        images_to_process = [] 
-
-        if filename.endswith('.pdf'):
-            try:
-                # 半角カナは線が細いのでDPI 300必須
-                pil_images = convert_from_bytes(file_bytes, dpi=300, fmt='jpeg')
-                for i, img in enumerate(pil_images):
-                    images_to_process.append((f"Page {i+1}", img))
-            except Exception as e:
-                print(f"❌ PDF Error: {e}")
-                return [[{'text': f"PDF Error: {e}"}]]
-        else:
-            img = Image.open(io.BytesIO(file_bytes))
-            images_to_process.append(("Page 1", img))
-
-        final_results = []
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            future_to_page = {executor.submit(self._process_single_page, item): item[0] for item in images_to_process}
-            
-            results_dict = {}
+            # ページ順がバラバラにならないよう、インデックスをキーに格納
+            results_by_page = {}
             for future in concurrent.futures.as_completed(future_to_page):
-                page_label, page_data = future.result()
-                results_dict[page_label] = page_data
+                idx = future_to_page[future]
+                results_by_page[idx] = future.result()
 
-        for label, _ in images_to_process:
-            if len(images_to_process) > 1:
-                final_results.append([{'text': f'--- {label} ---', 'is_header': True}])
-            
-            if label in results_dict:
-                final_results.extend(results_dict[label])
+        # 3. ページ順（0, 1, 2...）に並べ直して最終リストを作成
+        for i in range(len(images)):
+            if i in results_by_page:
+                final_output.extend(results_by_page[i])
 
-        return final_results
+        return final_output
 
+# インスタンス化
 engine = OcrEngine()
