@@ -46,24 +46,21 @@ class OcrEngine:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Generic-Column Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Rectangular-Matrix Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
 
     # =========================================================================
-    # 🧹 クリーニング
+    # 🧹 テキスト処理 (ノイズ除去のみ)
     # =========================================================================
     
     def _clean_text(self, val):
         if val is None: return ""
-        if isinstance(val, (dict, list)): val = str(val)
-        val = str(val)
-        val = val.replace("\n", "").replace("\r", "")
-        # ノイズ削除
+        val = str(val).replace("\n", "").replace("\r", "")
+        # OCR特有の誤認識文字（罫線など）をスペースに置換
         val = val.replace("■", " ").replace("□", " ").replace("図", " ")
-        val = re.sub(r'\s+', ' ', val)
-        return val.strip()
+        return re.sub(r'\s+', ' ', val).strip()
 
     # =========================================================================
     # 🖼️ 画像処理
@@ -100,11 +97,8 @@ class OcrEngine:
             elif cleaned.startswith("```"): cleaned = cleaned[3:-3]
             return json.loads(cleaned)
         except: pass
-        try:
-            if cleaned.count('"') % 2 != 0: cleaned += '"'
-            if not cleaned.endswith("}"): cleaned += "}]}"
-            return json.loads(cleaned)
-        except: pass
+        
+        # 簡易正規表現によるJSON抽出
         try:
             candidate_rows = re.findall(r'\[(.*?)\]', text, re.DOTALL)
             valid_rows = []
@@ -113,16 +107,6 @@ class OcrEngine:
                 try:
                     row_data = json.loads(f"[{row_content}]")
                     if isinstance(row_data, list): valid_rows.append(row_data)
-                    continue
-                except: pass
-                try:
-                    row_data = ast.literal_eval(f"[{row_content}]")
-                    if isinstance(row_data, list): valid_rows.append(row_data)
-                    continue
-                except: pass
-                try:
-                    items = re.findall(r'"([^"]*)"', row_content)
-                    if items: valid_rows.append(items)
                 except: pass
             if valid_rows: return {"table_rows": valid_rows}
         except: pass
@@ -130,214 +114,104 @@ class OcrEngine:
 
     def _call_ai_api(self, image_part, part_label):
         prompt = """
-        あなたは日本語OCRエンジンです。画像からテキストを抽出してください。
+        あなたは高精度の日本語OCRエンジンです。画像内の表データを抽出してください。
         
         【重要命令】
         - **改行コード禁止。**
-        - **半角カナは半角のまま出力すること。**
-        - 空欄は `""` とする。
-        - 途中にあるヘッダー行は無視してデータ行だけ抽出。
-        - **「図」や「□」などの不要な記号は出力しないこと。**
+        - **半角カナはそのまま出力。**
+        - セル内に複数の単語がある場合はスペースで区切ること。
+        - 途中にある項目名（ヘッダー）も無視せず、データとして抽出してください。
 
         【出力フォーマット (JSON)】
         {
-          "document_info": { "title": "タイトル", "org_name": "発行元", "sub_name": "支店", "account_name": "名義", "period": "期間", "other_info": "その他" },
+          "document_info": { "title": "タイトル", "org_name": "発行元", "period": "期間" },
           "table_headers": ["項目1", "項目2", ...],
           "table_rows": [ 
-             ["2026-01-22", "ﾌﾘｺﾐ ﾃｽﾄ", "10,000", "", "50,000", "本店"],
+             ["データ1", "データ2", "データ3", ...],
           ]
         }
         """
-
-        retry_models = [self.model_name, 'gemini-2.5-pro', 'gemini-2.0-flash']
-        
-        for current_model_name in retry_models:
-            try:
-                current_model = genai.GenerativeModel(
-                    current_model_name,
-                    generation_config=self.generation_config,
-                    safety_settings=self.safety_settings
-                )
-                response = current_model.generate_content([prompt, image_part])
-                try:
-                    if not response.candidates: raise ValueError("No candidates")
-                    return response.text
-                except ValueError as ve:
-                    if response.candidates and response.candidates[0].content.parts:
-                        return response.candidates[0].content.parts[0].text
-                    raise ve
-            except Exception as e:
-                print(f"⚠️ API Error ({part_label} - {current_model_name}): {e}")
-                time.sleep(1)
-                continue
-        return None
+        try:
+            response = self.model.generate_content([prompt, image_part])
+            return response.text
+        except Exception as e:
+            print(f"⚠️ API Error ({part_label}): {e}")
+            return None
 
     # =========================================================================
-    # 🔄 マージ処理 (単純結合)
+    # 🔄 マージ & ★完全行列化 (全行の列数を統一)
     # =========================================================================
 
     def _merge_split_results(self, results):
-        combined_json = { "document_info": {}, "table_headers": [], "table_rows": [] }
-        
-        target_source = "Top" if "Top" in results else "Bottom"
-        if target_source in results:
-            combined_json["document_info"] = results[target_source].get("document_info", {})
-            combined_json["table_headers"] = results[target_source].get("table_headers", [])
-
-        final_rows = []
+        combined_rows = []
         seen_exact_rows = set()
-        
+
+        # 文書情報を最初に追加
+        doc_info = results.get("Top", results.get("Bottom", {})).get("document_info", {})
+        for k, v in doc_info.items():
+            if v: combined_rows.append([f"{v}"])
+
+        # 表データを追加（Top -> Bottom の順）
         for source in ["Top", "Bottom"]:
             if source not in results: continue
-            raw_rows = results[source].get("table_rows", [])
-            for row in raw_rows:
+            
+            # ヘッダーがあれば追加
+            headers = results[source].get("table_headers", [])
+            if headers: combined_rows.append([self._clean_text(h) for h in headers])
+            
+            # データ行を追加
+            for row in results[source].get("table_rows", []):
                 if not row or all(str(c).strip() == "" for c in row): continue
-                
                 cleaned_row = [self._clean_text(c) for c in row]
                 
+                # 完全一致する行のみ重複排除
                 row_str = str(cleaned_row)
-                if row_str in seen_exact_rows: continue
-                seen_exact_rows.add(row_str)
-                
-                final_rows.append(cleaned_row)
+                if row_str not in seen_exact_rows:
+                    seen_exact_rows.add(row_str)
+                    combined_rows.append(cleaned_row)
 
-        combined_json["table_rows"] = final_rows
-        return combined_json, len(final_rows)
-
-    # =========================================================================
-    # 📊 UIデータ整形 & ★汎用ヘッダー補完
-    # =========================================================================
-
-    def _format_to_ui_data(self, combined_json):
-        formatted_rows = []
-
-        # --- 1. 文書情報 ---
-        doc_info = combined_json.get("document_info", {})
-        title_text = self._clean_text(doc_info.get('title'))
-        if title_text: formatted_rows.append([{'text': f"■ {title_text}"}])
-        
-        org_info = []
-        for key in ['org_name', 'sub_name', 'bank_name', 'branch_name']:
-            val = self._clean_text(doc_info.get(key))
-            if val: org_info.append(val)
-        if org_info: formatted_rows.append([{'text': " ".join(org_info)}])
-
-        meta_texts = []
-        if doc_info.get("account_name"): meta_texts.append(f"名義: {self._clean_text(doc_info['account_name'])}")
-        if doc_info.get("period"): meta_texts.append(f"期間: {self._clean_text(doc_info['period'])}")
-        if doc_info.get("other_info"): meta_texts.append(self._clean_text(doc_info['other_info']))
-        if meta_texts: formatted_rows.append([{'text': " / ".join(meta_texts)}])
-        
-        formatted_rows.append([{'text': ""}])
-
-        # --- 2. 最大列数の計算 ---
-        headers = combined_json.get("table_headers", [])
-        raw_rows = combined_json.get("table_rows", [])
-        
+        # ★【核心】最大列数を計算して、すべての行をパディングする
         max_cols = 0
-        if headers: max_cols = max(max_cols, len(headers))
-        for row in raw_rows:
+        for row in combined_rows:
             max_cols = max(max_cols, len(row))
-        max_cols = max(max_cols, 1)
-
-        # --- 3. ヘッダーの拡張 (汎用版) ---
-        clean_headers = []
-        if headers:
-            clean_headers = [self._clean_text(h) for h in headers]
         
-        # ★重要: 「摘要」などの言葉は使わず、単純な連番で埋める
-        # これにより、どんな書類でも「隠れている列」を強制的に表示させる
-        while len(clean_headers) < max_cols:
-            col_index = len(clean_headers) + 1
-            # (7), (8) のように連番を振る（CSVの列番号のようなイメージ）
-            clean_headers.append(f"({col_index})")
+        # UIに渡す最終形式を作成
+        final_ui_output = []
+        for row in combined_rows:
+            padded_row = row[:]
+            while len(padded_row) < max_cols:
+                padded_row.append("") # 足りない列を空文字で埋めて「枠」を確保
             
-        if clean_headers:
-            formatted_rows.append([{'text': h} for h in clean_headers])
+            final_ui_output.append([{'text': cell} for cell in padded_row])
 
-        # --- 4. データ行のパディング ---
-        for row in raw_rows:
-            clean_row = [self._clean_text(cell) for cell in row]
-            
-            while len(clean_row) < max_cols:
-                clean_row.append("")
-            
-            formatted_cells = [{'text': cell} for cell in clean_row]
-            formatted_rows.append(formatted_cells)
-
-        return formatted_rows
-
-    # =========================================================================
-    # 🚀 メイン処理
-    # =========================================================================
-
-    def _process_single_page(self, args):
-        page_label, pil_image = args
-        optimized_image = self._optimize_image(pil_image)
-        parts = self._split_image(optimized_image)
-        
-        results = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            future_to_part = {}
-            for p_name, p_img in parts:
-                img_byte_arr = io.BytesIO()
-                p_img.save(img_byte_arr, format='WEBP', quality=100)
-                image_part = {"mime_type": "image/webp", "data": img_byte_arr.getvalue()}
-                
-                future = executor.submit(self._call_ai_api, image_part, f"{page_label}-{p_name}")
-                future_to_part[future] = p_name
-
-            for future in concurrent.futures.as_completed(future_to_part):
-                p_name = future_to_part[future]
-                res_text = future.result()
-                if res_text:
-                    repaired_data = self._repair_json(res_text)
-                    if repaired_data:
-                        results[p_name] = repaired_data
-                    else:
-                        print(f"❌ JSON Repair Failed for {p_name}")
-
-        combined_json, row_count = self._merge_split_results(results)
-        formatted_rows = self._format_to_ui_data(combined_json)
-        
-        print(f"✅ Success ({page_label}) - Merged {row_count} rows")
-        return (page_label, formatted_rows)
-
+        return final_ui_output
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Generic-Column Mode...")
+        print(f"⏳ Starting AI OCR - Strict Matrix Mode...")
         if not self.model: return [[{'text': "Error: AI Model not initialized."}]]
 
         uploaded_file.seek(0)
         file_bytes = uploaded_file.read()
         
-        try: filename = uploaded_file.name.lower()
-        except: filename = "unknown.jpg"
-            
-        images_to_process = [] 
-        if filename.endswith('.pdf'):
-            try:
-                pil_images = convert_from_bytes(file_bytes, dpi=250, fmt='jpeg')
-                for i, img in enumerate(pil_images):
-                    images_to_process.append((f"Page {i+1}", img))
-            except Exception as e: return [[{'text': f"PDF Error: {e}"}]]
-        else:
+        try:
             img = Image.open(io.BytesIO(file_bytes))
-            images_to_process.append(("Page 1", img))
+            optimized_img = self._optimize_image(img)
+            parts = self._split_image(optimized_img)
+            
+            results = {}
+            for p_name, p_img in parts:
+                img_byte_arr = io.BytesIO()
+                p_img.save(img_byte_arr, format='WEBP')
+                image_part = {"mime_type": "image/webp", "data": img_byte_arr.getvalue()}
+                
+                res_text = self._call_ai_api(image_part, p_name)
+                if res_text:
+                    parsed = self._repair_json(res_text)
+                    if parsed: results[p_name] = parsed
 
-        final_results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            future_to_page = {executor.submit(self._process_single_page, item): item[0] for item in images_to_process}
-            results_dict = {}
-            for future in concurrent.futures.as_completed(future_to_page):
-                page_label, page_data = future.result()
-                results_dict[page_label] = page_data
+            return self._merge_split_results(results)
 
-        for label, _ in images_to_process:
-            if len(images_to_process) > 1:
-                final_results.append([{'text': f'--- {label} ---'}])
-            if label in results_dict:
-                final_results.extend(results_dict[label])
-        return final_results
+        except Exception as e:
+            return [[{'text': f"Processing Error: {e}"}]]
 
 engine = OcrEngine()
