@@ -46,7 +46,7 @@ class OcrEngine:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings
             )
-            print(f"⚙️ Initial Model config: {self.model_name} (Force-Column-Show Mode)")
+            print(f"⚙️ Initial Model config: {self.model_name} (Strict-Matrix Mode)")
 
         except Exception as e:
             print(f"❌ API Configuration Error: {e}")
@@ -178,8 +178,7 @@ class OcrEngine:
 
     def _merge_split_results(self, results):
         combined_json = { "document_info": {}, "table_headers": [], "table_rows": [] }
-
-        # Top情報を優先
+        
         target_source = "Top" if "Top" in results else "Bottom"
         if target_source in results:
             combined_json["document_info"] = results[target_source].get("document_info", {})
@@ -187,22 +186,16 @@ class OcrEngine:
 
         final_rows = []
         seen_exact_rows = set()
-
-        source_order = ["Top", "Bottom"]
         
-        for source in source_order:
+        for source in ["Top", "Bottom"]:
             if source not in results: continue
-            
             raw_rows = results[source].get("table_rows", [])
-            
             for row in raw_rows:
                 if not row or all(str(c).strip() == "" for c in row): continue
                 
-                # キーワードによるヘッダー判定は廃止（誤判定防止）
-
                 cleaned_row = [self._clean_text(c) for c in row]
                 
-                # 文字列としての完全一致だけ排除
+                # 完全一致（文字列）のみ排除
                 row_str = str(cleaned_row)
                 if row_str in seen_exact_rows: continue
                 
@@ -213,72 +206,68 @@ class OcrEngine:
         return combined_json, len(final_rows)
 
     # =========================================================================
-    # 📊 UIデータ整形 & ★ヘッダー強制拡張 (修正の核心)
+    # 📊 UIデータ整形 & ★完全行列パディング (修正の核心)
     # =========================================================================
 
     def _format_to_ui_data(self, combined_json):
-        formatted_rows = []
+        # 1. まず全ての行（メタデータ、ヘッダー、データ）を「文字列のリスト」として用意する
+        meta_rows_raw = []
+        table_rows_raw = []
 
-        # --- 1. 文書情報 ---
+        # --- 文書情報 ---
         doc_info = combined_json.get("document_info", {})
         title_text = self._clean_text(doc_info.get('title'))
-        if title_text: formatted_rows.append([{'text': f"■ {title_text}"}])
+        if title_text: meta_rows_raw.append([f"■ {title_text}"])
         
         org_info = []
         for key in ['org_name', 'sub_name', 'bank_name', 'branch_name']:
             val = self._clean_text(doc_info.get(key))
             if val: org_info.append(val)
-        if org_info: formatted_rows.append([{'text': " ".join(org_info)}])
+        if org_info: meta_rows_raw.append([" ".join(org_info)])
 
         meta_texts = []
         if doc_info.get("account_name"): meta_texts.append(f"名義: {self._clean_text(doc_info['account_name'])}")
         if doc_info.get("period"): meta_texts.append(f"期間: {self._clean_text(doc_info['period'])}")
         if doc_info.get("other_info"): meta_texts.append(self._clean_text(doc_info['other_info']))
-        if meta_texts: formatted_rows.append([{'text': " / ".join(meta_texts)}])
+        if meta_texts: meta_rows_raw.append([" / ".join(meta_texts)])
         
-        formatted_rows.append([{'text': ""}])
+        meta_rows_raw.append([""]) # 空行
 
-        # --- 2. 最大列数の計算 ---
+        # --- 表データ ---
         headers = combined_json.get("table_headers", [])
-        raw_rows = combined_json.get("table_rows", [])
-        
-        max_cols = 0
-        if headers: 
-            max_cols = max(max_cols, len(headers))
-        for row in raw_rows:
-            max_cols = max(max_cols, len(row))
-        
-        # 最低でも1列
-        max_cols = max(max_cols, 1)
-
-        # --- 3. ヘッダーの強制拡張 ---
-        # データが7列あるのにヘッダーが6列だと、7列目が表示されないUIが多いため、
-        # ヘッダーの数を強制的に max_cols まで増やす。
-        
-        clean_headers = []
         if headers:
-            clean_headers = [self._clean_text(h) for h in headers]
+            table_rows_raw.append([self._clean_text(h) for h in headers])
         
-        # ★重要: 空文字 "" だと表示されない場合があるので、"(列N)" のように文字を入れる
-        while len(clean_headers) < max_cols:
-            col_num = len(clean_headers) + 1
-            clean_headers.append(f"(列{col_num})")
-            
-        if clean_headers:
-            formatted_rows.append([{'text': h} for h in clean_headers])
+        raw_data = combined_json.get("table_rows", [])
+        for row in raw_data:
+            table_rows_raw.append([self._clean_text(cell) for cell in row])
 
-        # --- 4. データ行のパディング ---
-        for row in raw_rows:
-            clean_row = [self._clean_text(cell) for cell in row]
-            
-            # データ行も足りない場合は空文字で埋める
-            while len(clean_row) < max_cols:
-                clean_row.append("")
-            
-            formatted_cells = [{'text': cell} for cell in clean_row]
-            formatted_rows.append(formatted_cells)
+        # 2. 全体の中で「最大の列数」を計算する
+        max_cols = 0
+        for row in meta_rows_raw: max_cols = max(max_cols, len(row))
+        for row in table_rows_raw: max_cols = max(max_cols, len(row))
+        max_cols = max(max_cols, 1) # 最低1列
 
-        return formatted_rows
+        # 3. 全ての行を max_cols に合わせてパディングし、UI用フォーマットに変換
+        # ★ここが重要: タイトル行もヘッダー行もデータ行も、すべて同じ列数にする
+        
+        final_ui_rows = []
+
+        # メタデータのパディング
+        for row in meta_rows_raw:
+            padded_row = row[:]
+            while len(padded_row) < max_cols:
+                padded_row.append("") # 空セルで埋める
+            final_ui_rows.append([{'text': cell} for cell in padded_row])
+
+        # 表データのパディング
+        for row in table_rows_raw:
+            padded_row = row[:]
+            while len(padded_row) < max_cols:
+                padded_row.append("") # 空セルで埋める
+            final_ui_rows.append([{'text': cell} for cell in padded_row])
+
+        return final_ui_rows
 
     # =========================================================================
     # 🚀 メイン処理
@@ -318,7 +307,7 @@ class OcrEngine:
 
 
     def extract_text(self, uploaded_file):
-        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Force-Column-Show Mode...")
+        print(f"⏳ Starting Gemini AI OCR ({self.model_name}) - Strict-Matrix Mode...")
         if not self.model: return [[{'text': "Error: AI Model not initialized."}]]
 
         uploaded_file.seek(0)
