@@ -1,0 +1,7 @@
+[server]
+# CORS（異なるドメイン間での通信）を許可する
+enableCORS = false
+# XSRF保護をオフにする（埋め込み時に必要）
+enableXsrfProtection = false
+# iframe内での表示を許可する設定（最新のStreamlitではこれが必要な場合があります）
+frameFeatures = "none"
