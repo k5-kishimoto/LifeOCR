@@ -118,9 +118,13 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
-# ★重要: Fly.ioのURLを「信頼できる送信元」として登録します
-# (https:// を忘れずにつけてください)
-CSRF_TRUSTED_ORIGINS = ['https://lifeocr.fly.dev']
+# Salesforceのドメインを許可
+CSRF_TRUSTED_ORIGINS = [
+    'https://*.force.com',
+    'https://*.salesforce.com',
+    'https://*.my.salesforce.com',
+    'https://lifeocr.fly.dev',  # 自分のアプリURLも忘れずに
+]
 
 # ★重要: Fly.ioなどのクラウド環境でHTTPSを正しく認識させる設定
 # (これがないと、「安全な接続ではない」と誤解されてエラーが続くことがあります)
@@ -129,3 +133,13 @@ SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 # iframe内での表示を許可する設定
 # 全て許可する場合（Salesforceなどの外部ドメインからの埋め込みに必要）
 X_FRAME_OPTIONS = 'ALLOWALL'
+
+# 第三者クッキーとしての送信を許可（Salesforce埋め込みに必須）
+CSRF_COOKIE_SAMESITE = 'None'
+CSRF_COOKIE_SECURE = True
+
+# セッションも同様の設定にする
+SESSION_COOKIE_SAMESITE = 'None'
+SESSION_COOKIE_SECURE = True
+
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
