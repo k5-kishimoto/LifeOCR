@@ -48,7 +48,7 @@ MIDDLEWARE = [
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # 'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
 ROOT_URLCONF = 'LifeOCR.urls'
@@ -125,3 +125,7 @@ CSRF_TRUSTED_ORIGINS = ['https://lifeocr.fly.dev']
 # ★重要: Fly.ioなどのクラウド環境でHTTPSを正しく認識させる設定
 # (これがないと、「安全な接続ではない」と誤解されてエラーが続くことがあります)
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# iframe内での表示を許可する設定
+# 全て許可する場合（Salesforceなどの外部ドメインからの埋め込みに必要）
+X_FRAME_OPTIONS = 'ALLOWALL'
