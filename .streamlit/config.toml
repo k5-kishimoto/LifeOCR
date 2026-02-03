@@ -1,7 +1,9 @@
 [server]
-# CORS（異なるドメイン間での通信）を許可する
+# CORSを完全に無効化
 enableCORS = false
-# XSRF保護をオフにする（埋め込み時に必要）
+# XSRF保護を無効化（埋め込みに必須）
 enableXsrfProtection = false
-# iframe内での表示を許可する設定（最新のStreamlitではこれが必要な場合があります）
+# iframe内での動作を許可
 frameFeatures = "none"
+# 以下の1行を念のため追加（Streamlitの内部的なヘッダー制御を緩める）
+enableStaticServing = true
